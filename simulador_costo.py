@@ -1,17 +1,104 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-from datetime import datetime
+from datetime import date
+import calendar 
 
-# --- CONFIGURACIÓN DE LA BASE DE DATOS ---
-DB_NAME = "minerva.db"
-BASE_LITROS = 200.0 # Cantidad base de la receta original
+# =================================================================================================
+# CONFIGURACIÓN Y CONSTANTES
+# =================================================================================================
+DB_PATH = "minerva.db"
+BASE_LITROS = 200.0 # Cantidad base de la receta original (Litros)
+# CONSTANTES CLAVE BASADAS EN LA LÓGICA DE PRESUPUESTO
+RECETAS_DIARIAS = 8.0 # <-- Nuevo valor fijo: 8 recetas diarias
+DIAS_HABILES_FIJOS_MENSUAL = 20.0 
+VOLUMEN_MENSUAL_AUTOMATICO = RECETAS_DIARIAS * DIAS_HABILES_FIJOS_MENSUAL * BASE_LITROS # 8 * 20 * 200 = 32000.0 L
 
-def conectar_db(db_name=DB_NAME):
+# =================================================================================================
+# UTILIDADES DB
+# =================================================================================================
+
+def get_connection():
     """Establece la conexión a la base de datos."""
-    conn = sqlite3.connect(db_name)
-    conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row 
     return conn
+
+def fetch_df(query, params=()):
+    """Ejecuta una consulta SELECT y devuelve los resultados como un DataFrame de Pandas."""
+    conn = get_connection()
+    try:
+        df = pd.read_sql_query(query, conn, params=params)
+    except sqlite3.Error as e:
+        st.error(f"Error al ejecutar la consulta: {e}")
+        return pd.DataFrame()
+    finally:
+        conn.close()
+    return df
+
+def get_categoria_id_by_name(category_name):
+    """Busca el ID de una categoría por su nombre."""
+    query = "SELECT id FROM categorias_imputacion WHERE nombre = ?"
+    df = fetch_df(query, (category_name,))
+    if df.empty:
+        return None
+    return df.iloc[0, 0]
+
+def get_costo_flete_ars():
+    """
+    Recupera el costo fijo de flete por receta (200L) desde la tabla 'gastos',
+    filtrando por el ID de categoría especial (FLETE_BASE_RECETA).
+    """
+    FLETE_CATEGORIA_ID_PARAMETRO = get_categoria_id_by_name('FLETE_BASE_RECETA')
+
+    if FLETE_CATEGORIA_ID_PARAMETRO is None:
+        return 0.0, "❌ Error de Configuración: La categoría 'FLETE_BASE_RECETA' no existe en la base de datos."
+        
+    query = f"""
+        SELECT importe_total 
+        FROM gastos 
+        WHERE categoria_id = {FLETE_CATEGORIA_ID_PARAMETRO}
+        LIMIT 1;
+    """
+    df_flete = fetch_df(query)
+    
+    if df_flete.empty:
+        return 0.0, f"❌ Error: No se encontró el registro de costo base de flete en la tabla 'gastos' con la Categoría ID {FLETE_CATEGORIA_ID_PARAMETRO}."
+        
+    return df_flete.iloc[0, 0], None
+
+def get_detalle_gastos_mensual(mes_simulacion, anio_simulacion):
+    """
+    Recupera el detalle de los gastos fijos para el mes y año seleccionado,
+    EXCLUYENDO el registro de parámetro de flete, y devuelve la suma total.
+    """
+    mes_str = f"{anio_simulacion:04d}-{mes_simulacion:02d}"
+    
+    FLETE_CATEGORIA_ID_PARAMETRO = get_categoria_id_by_name('FLETE_BASE_RECETA')
+
+    # Filtra la consulta solo si la categoría existe
+    filtro_flete = f"AND g.categoria_id != {FLETE_CATEGORIA_ID_PARAMETRO}" if FLETE_CATEGORIA_ID_PARAMETRO is not None else ""
+    
+    query = f"""
+        SELECT 
+            g.importe_total AS Importe_ARS
+        FROM gastos g
+        JOIN categorias_imputacion c ON g.categoria_id = c.id
+        WHERE (g.fecha_pago LIKE '{mes_str}-%' OR g.fecha_factura LIKE '{mes_str}-%')
+           {filtro_flete} 
+    """
+    df_gastos = fetch_df(query)
+    
+    if df_gastos.empty:
+        return 0.0, "No se encontraron gastos fijos para este mes (excluyendo Flete)."
+    
+    total_gasto = df_gastos['Importe_ARS'].sum()
+    return total_gasto, None
+
+
+# =================================================================================================
+# FUNCIONES EXISTENTES (De costeo de MP)
+# =================================================================================================
 
 def obtener_todas_materias_primas(conn):
     """Obtiene la lista completa de materias primas disponibles con IDs."""
@@ -54,14 +141,13 @@ def obtener_precio_actual_materia_prima(conn, materia_prima_id):
     
     precio = cursor.fetchone()
     if precio:
-        # Nota: precio_unitario guarda el precio final en ARS con el que se registró la compra
         return precio['precio_unitario'], precio['costo_flete'], precio['otros_costos'], precio['cotizacion_usd']
     else:
         return 0.0, 0.0, 0.0, 1.0
 
 def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
     """
-    Calcula el costo total de la receta en ARS, aplicando la cotización del dólar actual.
+    Calcula el costo total SÓLO de la Materia Prima en ARS (incluyendo flete/otros asociados a la MP).
     """
     detalle_costo = []
     
@@ -71,7 +157,6 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
         nombre_mp = ingrediente["Materia Prima"]
         
         # 1. Obtener precios: prioridad del precio manual de la tabla
-        # ATENCIÓN: Para MPs Temporales Nuevas, el 'precio_unitario_manual' ahora es el precio en USD.
         precio_manual = ingrediente.get('precio_unitario_manual', 0.0)
         cotizacion_manual = ingrediente.get('cotizacion_usd_manual', 1.0)
         es_temporal_nueva = ingrediente.get('Temporal', False) and materia_prima_id == -1
@@ -82,40 +167,32 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
         otros_costos = 0.0 
 
         if es_temporal_nueva and precio_manual > 0.0:
-            # Caso 1a: MP Temporal NUEVA (Ingresada como USD en el formulario)
             precio_base_usd = precio_manual 
             cotizacion_usd_reg = cotizacion_manual
-            precio_unitario_reg = precio_base_usd * cotizacion_usd_reg # Se convierte a ARS de registro
+            precio_unitario_reg = precio_base_usd * cotizacion_usd_reg 
             
         elif precio_manual > 0.0 and not es_temporal_nueva:
-            # Caso 1b: MP Existente con PRECIO MANUAL sobrescrito (Debe ser en ARS)
             precio_unitario_reg = precio_manual
             cotizacion_usd_reg = cotizacion_manual
             
         elif materia_prima_id != -1:
-            # Caso 2: MP existente (base o temporal sin precio manual). Usamos la BD.
             precio_unitario_reg, costo_flete, otros_costos, cotizacion_usd_reg = \
                 obtener_precio_actual_materia_prima(conn, materia_prima_id)
         else:
-             # Caso 3: MP Temporal nueva sin precio USD (> 0)
             precio_unitario_reg, costo_flete, otros_costos, cotizacion_usd_reg = 0.0, 0.0, 0.0, 1.0
 
         # 2. Lógica de Dolarización
         costo_unitario_ars = 0.0
         
         if cotizacion_usd_reg > 1.0:
-            # El precio registrado/calculado está dolarizado. Lo actualizamos con el dólar del día.
-            # 1. Volver a USD (Precio Base de Compra)
             precio_base_usd = precio_unitario_reg / cotizacion_usd_reg
-            # 2. Convertir al ARS del día de la simulación
             costo_unitario_ars = precio_base_usd * cotizacion_dolar_actual
             moneda_origen = f'USD ({cotizacion_usd_reg:.2f})'
         else:
-            # Precio fijo en ARS
             costo_unitario_ars = precio_unitario_reg
             moneda_origen = 'ARS (Fijo)'
 
-        # 3. Sumar costos asociados
+        # 3. Sumar costos asociados (Flete y Otros Costos ya están incluidos aquí)
         costo_unitario_final_ars = costo_unitario_ars + costo_flete + otros_costos
         costo_ingrediente_total = cantidad_usada * costo_unitario_final_ars
         
@@ -125,7 +202,7 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
             "Cantidad (Simulada)": cantidad_usada,
             "Moneda Origen": moneda_origen,
             "Costo Unit. ARS (Base)": costo_unitario_ars,
-            "Flete / Otros": costo_flete + otros_costos,
+            "Flete / Otros MP": costo_flete + otros_costos, 
             "Costo Unit. ARS (Total)": costo_unitario_final_ars,
             "Costo Total ARS": costo_ingrediente_total
         })
@@ -134,6 +211,10 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
     costo_total_ars = detalle_df["Costo Total ARS"].sum()
     
     return costo_total_ars, detalle_df
+
+# =================================================================================================
+# INTERFAZ STREAMLIT
+# =================================================================================================
 
 def main():
     st.set_page_config(layout="wide")
@@ -150,10 +231,67 @@ def main():
         st.session_state['detalle_costo'] = pd.DataFrame()
         st.session_state['litros'] = BASE_LITROS
         st.session_state['dolar'] = 1000.0
+        st.session_state['gasto_fijo_mensual'] = 0.0 
+        st.session_state['flete_base_200l'] = 0.0
 
-    conn = conectar_db()
-    cursor = conn.cursor()
+    conn = get_connection()
+    
+    # --- FIJAR MES A SEPTIEMBRE (9) ---
+    MES_SIMULACION = 9 
+    
+    st.sidebar.subheader(f"Costos Fijos Automáticos (Septiembre)")
+    
+    # -----------------------------------------------------------
+    # 1. CÁLCULO AUTOMÁTICO DE GASTOS FIJOS OPERATIVOS (Septiembre)
+    # -----------------------------------------------------------
+    anio_simulacion = st.sidebar.number_input(
+        "Año de Gasto Fijo a Simular:", 
+        min_value=2020, 
+        value=date.today().year, 
+        step=1, 
+        key="anio_simulacion_value"
+    )
+    
+    gasto_fijo_mensual_auto, error_gasto = get_detalle_gastos_mensual(MES_SIMULACION, anio_simulacion)
+    st.session_state['gasto_fijo_mensual'] = gasto_fijo_mensual_auto
+    
+    st.sidebar.markdown(f"**Gasto Operativo Total ({calendar.month_name[MES_SIMULACION].capitalize()} {anio_simulacion}):**")
+    st.sidebar.success(f"${gasto_fijo_mensual_auto:,.2f} ARS (De Gastos de BD)")
+    if error_gasto: st.sidebar.warning(f"⚠️ {error_gasto}")
+    
+    # -----------------------------------------------------------
+    # 2. CÁLCULO AUTOMÁTICO DE FLETE BASE (200L)
+    # -----------------------------------------------------------
+    costo_flete_x_receta_ars, error_flete = get_costo_flete_ars()
+    st.session_state['flete_base_200l'] = costo_flete_x_receta_ars
+    
+    st.sidebar.markdown(f"**Costo Flete Base por Receta ({BASE_LITROS:.0f}L):**")
+    st.sidebar.info(f"${costo_flete_x_receta_ars:,.2f} ARS (De Configuración BD)")
+    if error_flete: st.sidebar.warning(f"⚠️ {error_flete}")
 
+    st.sidebar.markdown("---")
+    
+    # -----------------------------------------------------------
+    # 3. VOLUMEN MENSUAL Y CÁLCULO DE OVERHEAD POR LITRO (AUTOMÁTICO)
+    # -----------------------------------------------------------
+    st.sidebar.subheader("Asignación de Costos por Overhead")
+    
+    # Cálculo automático del volumen mensual basado en las 8 recetas diarias
+    volumen_mensual_litros = VOLUMEN_MENSUAL_AUTOMATICO
+    
+    st.sidebar.markdown(f"**Volumen Mensual de Producción (8 Recetas/Día):**")
+    st.sidebar.info(f"{volumen_mensual_litros:,.0f} Litros/Mes")
+
+    # Calcular Costo Indirecto por Litro
+    if volumen_mensual_litros > 0:
+        costo_indirecto_por_litro = gasto_fijo_mensual_auto / volumen_mensual_litros
+    else:
+        costo_indirecto_por_litro = 0.0
+        
+    st.sidebar.metric("Costo Indirecto Operativo por Litro", f"${costo_indirecto_por_litro:,.2f} ARS/L")
+
+    st.sidebar.markdown("---")
+    
     # --- ENTRADA DEL DÓLAR DEL DÍA ---
     st.sidebar.subheader("Cotización Dólar del Día")
     cotizacion_dolar_actual = st.sidebar.number_input(
@@ -166,8 +304,13 @@ def main():
     )
     st.session_state['dolar_value'] = cotizacion_dolar_actual
     st.session_state['dolar'] = cotizacion_dolar_actual
-
+    
+    # =======================================================================
+    # MAIN APP LOGIC
+    # =======================================================================
+    
     # --- SELECCIÓN DE RECETA ---
+    cursor = conn.cursor()
     cursor.execute("SELECT id, nombre FROM recetas ORDER BY nombre")
     recetas_db = cursor.fetchall()
     recetas = {r["id"]: r["nombre"] for r in recetas_db}
@@ -198,7 +341,7 @@ def main():
         format="%.2f",
         key="litros_input"
     )
-    col_base.info(f"Receta Base: {BASE_LITROS} L")
+    col_base.info(f"Receta Base: {BASE_LITROS:.0f} L")
     factor_escala = cantidad_litros / BASE_LITROS
     st.info(f"Factor de Escala (Simulación): **{factor_escala:.4f}**")
 
@@ -219,7 +362,7 @@ def main():
             'Quitar': False,
             'Temporal': False,
             'precio_unitario_manual': 0.0,
-            'cotizacion_usd_manual': 1.0, # 0.0 y 1.0 fuerzan la búsqueda en la BD para ingredientes base
+            'cotizacion_usd_manual': 1.0, 
         })
     # b) Ingredientes Temporales (Nuevos o Existentes agregados)
     for i, temp in enumerate(st.session_state.ingredientes_temporales):
@@ -234,7 +377,6 @@ def main():
             'cantidad_simulada': temp['cantidad_base'] * factor_escala,
             'Quitar': False,
             'Temporal': True,
-            # Estos valores son los que se usan para MPs Temporales (precio_unitario_manual es USD para MPs Nuevas)
             'precio_unitario_manual': temp['precio_unitario'], 
             'cotizacion_usd_manual': temp['cotizacion_usd'],
         })
@@ -249,34 +391,14 @@ def main():
         "Materia Prima": st.column_config.TextColumn(disabled=True),
         "materia_prima_id": st.column_config.TextColumn(disabled=True),
         "Unidad": st.column_config.TextColumn(disabled=True),
-        "Cantidad Base (200L)": st.column_config.NumberColumn(
-            help="Cantidad requerida para la base (200L).",
-            format="%.4f",
-        ),
-        "cantidad_simulada": st.column_config.NumberColumn(
-            "Cantidad (Total L)",
-            help=f"Cantidad total requerida para {cantidad_litros:.2f}L.",
-            format="%.4f",
-            disabled=True,
-        ),
-        "Quitar": st.column_config.CheckboxColumn(
-            help="Marque para excluir de la simulación.",
-        ),
+        "Cantidad Base (200L)": st.column_config.NumberColumn(help="Cantidad requerida para la base (200L).", format="%.4f",),
+        "cantidad_simulada": st.column_config.NumberColumn("Cantidad (Total L)", format="%.4f", disabled=True,),
+        "Quitar": st.column_config.CheckboxColumn(help="Marque para excluir de la simulación.",),
         "Temporal": st.column_config.CheckboxColumn(disabled=True),
-        "precio_unitario_manual": st.column_config.NumberColumn(
-            "Precio Manual Unit. (ARS/USD)",
-            help="Precio que se usará. Para MP Existente, sobrescribe el precio ARS. Para MP Nueva, es el precio USD.",
-            format="%.4f",
-        ),
-        "cotizacion_usd_manual": st.column_config.NumberColumn(
-            "Cot. USD (Manual)",
-            help="Cotización USD correspondiente al precio manual. Si es MP de BD, sobrescribe la cotización. Si es 1.0, usa la de BD.",
-            format="%.2f",
-            min_value=1.0,
-        ),
+        "precio_unitario_manual": st.column_config.NumberColumn("Precio Manual Unit. (ARS/USD)", format="%.4f",),
+        "cotizacion_usd_manual": st.column_config.NumberColumn("Cot. USD (Manual)", format="%.2f", min_value=1.0,),
     }
     
-    # Mostrar solo las columnas relevantes al usuario
     cols_display = ["Materia Prima", "Unidad", "Cantidad Base (200L)", "cantidad_simulada", 
                     "precio_unitario_manual", "cotizacion_usd_manual", "Quitar"]
 
@@ -297,34 +419,72 @@ def main():
 
     # --- LÓGICA DE CÁLCULO EN VIVO ---
     ingredientes_a_calcular = ingredientes_df[~ingredientes_df['Quitar']].copy()
-    costo_total, detalle_costo_df = calcular_costo_total(
+    
+    # Costo SÓLO de Materia Prima (Incluye Flete/Otros por MP)
+    costo_mp_total, detalle_costo_df = calcular_costo_total(
         ingredientes_a_calcular, 
         cotizacion_dolar_actual, 
         conn
     )
     
-    st.session_state['costo_total'] = costo_total
-    st.session_state['detalle_costo'] = detalle_costo_df
+    # --------------------------------------------------------------------------
+    # CÁLCULOS DE COSTOS FIJOS (LÓGICA AUTOMÁTICA)
+    # --------------------------------------------------------------------------
+    
+    # CÁLCULO DEL GASTO INDIRECTO (OVERHEAD)
+    gasto_indirecto_tanda = costo_indirecto_por_litro * cantidad_litros
+    
+    # CÁLCULO DEL FLETE GENERAL (COMO COSTO DIRECTO)
+    costo_flete_total_ars = st.session_state['flete_base_200l'] * factor_escala
+    
+    # CÁLCULO DEL COSTO TOTAL FINAL
+    # Costo Total Final = (MP + Flete/Otros MP) + Flete General + Indirecto Operativo
+    costo_total_final = costo_mp_total + costo_flete_total_ars + gasto_indirecto_tanda
+    
+    # Actualizar Session State (para uso futuro)
+    st.session_state['costo_total_mp_y_flete_mp'] = costo_mp_total
+    st.session_state['costo_flete_general_tanda'] = costo_flete_total_ars
+    st.session_state['costo_total_final'] = costo_total_final
     st.session_state['litros'] = cantidad_litros
     
     st.subheader(f"✅ Resultado del Costo en Vivo para {st.session_state['litros']:.2f} Litros (Dólar: ${st.session_state['dolar']:.2f})")
     
-    col_res1, col_res2 = st.columns(2)
+    # MUESTRA DE RESULTADOS AMPLIADA
+    col_res1, col_res2, col_res3 = st.columns(3) 
+    
     col_res1.metric(
-        "Costo Total de Materia Prima",
-        f"${st.session_state['costo_total']:,.2f} ARS"
+        "Costo Materia Prima (Incl. Flete/Otros MP)",
+        f"${costo_mp_total:,.2f} ARS"
     )
     col_res2.metric(
+        "Flete General (Escalado)",
+        f"${costo_flete_total_ars:,.2f} ARS",
+        help=f"Costo Flete Base (200L): ${st.session_state['flete_base_200l']:,.2f} ARS"
+    )
+    col_res3.metric(
+        "Gasto Indirecto Tanda (Overhead)",
+        f"${gasto_indirecto_tanda:,.2f} ARS"
+    )
+
+    st.markdown("---")
+    st.header("COSTO TOTAL FINAL")
+    col_final_1, col_final_2 = st.columns(2)
+    
+    col_final_1.metric(
+        "Costo Total Final de la Tanda",
+        f"${costo_total_final:,.2f} ARS"
+    )
+    
+    col_final_2.metric(
         "Costo por Litro",
-        f"${st.session_state['costo_total'] / st.session_state['litros']:,.2f} ARS/Litro"
+        f"${costo_total_final / st.session_state['litros']:,.2f} ARS/L"
     )
     
     with st.expander("Ver Detalle de Costo por Ingrediente 🔎"):
-        st.dataframe(st.session_state['detalle_costo'], use_container_width=True)
+        st.dataframe(detalle_costo_df, use_container_width=True)
 
     
     # --- GESTIÓN DE ESTADO TEMPORAL ---
-    
     st.header("⚙️ Guardar Estado de Simulación Temporal")
     
     if st.button("Aplicar Cambios (Cantidades y Precios) al Estado Temporal"):
@@ -355,112 +515,48 @@ def main():
     
     tab_existente, tab_nueva = st.tabs(["MP Existente (Precio de BD)", "MP Nueva (Precio USD)"])
 
-    # ----------------------------------------------------
-    # TAB 1: MP EXISTENTE (Usa precios de la base de datos)
-    # ----------------------------------------------------
     with tab_existente:
         st.markdown("**Seleccione una MP existente y la cantidad base. El precio se tomará automáticamente del último registro de la BD.**")
         with st.form("form_agregar_mp_existente"):
-            
-            mp_existente_nombre = st.selectbox(
-                "Materia Prima:",
-                mp_nombres,
-                key="mp_existente_select_key" 
-            )
-            
-            # Obtener y mostrar precios de BD al seleccionar
+            mp_existente_nombre = st.selectbox("Materia Prima:", mp_nombres, key="mp_existente_select_key")
             mp_info = mp_map[mp_existente_nombre]
             mp_id = mp_info['id']
             precio_unitario_ars, _, _, cotizacion_usd_reg_bd = obtener_precio_actual_materia_prima(conn, mp_id)
-            
-            # Mostrar solo el precio, ocultando la cotización registrada
-            col_info_precio1, col_info_precio2 = st.columns(2)
+            col_info_precio1, _ = st.columns(2)
             if cotizacion_usd_reg_bd > 1.0:
                 precio_base_usd = precio_unitario_ars / cotizacion_usd_reg_bd
                 col_info_precio1.metric("Precio Registrado (USD)", f"${precio_base_usd:.4f} USD")
-                # col_info_precio2 (Cot. Reg. ARS) ahora está vacío
             else:
                 col_info_precio1.metric("Precio Registrado (ARS)", f"${precio_unitario_ars:,.2f} ARS")
-                # col_info_precio2 (Cot. Reg. ARS) ahora está vacío
-
             st.markdown("---")
-            
-            # Cantidad y Unidad
             col_cant, col_unidad_display = st.columns(2)
-            cantidad_base = col_cant.number_input(
-                "Cantidad Base (para 200L):",
-                min_value=0.0001,
-                value=1.0,
-                step=0.01,
-                format="%.4f",
-                key="temp_cantidad_existente"
-            )
+            cantidad_base = col_cant.number_input("Cantidad Base (para 200L):", min_value=0.0001, value=1.0, step=0.01, format="%.4f", key="temp_cantidad_existente")
             col_unidad_display.text_input("Unidad de Medida:", value=mp_info['unidad'], disabled=True)
 
             if st.form_submit_button("Agregar MP Existente"):
-                
-                # Se agrega con precio_unitario=0.0 y cotizacion_usd=1.0 para forzar el uso de la BD en el cálculo
                 st.session_state.ingredientes_temporales.append({
-                    'nombre': mp_info['nombre'],
-                    'unidad': mp_info['unidad'],
-                    'cantidad_base': cantidad_base,
-                    'precio_unitario': 0.0, 
-                    'cotizacion_usd': 1.0,
-                    'materia_prima_id': mp_info['id'] 
+                    'nombre': mp_info['nombre'], 'unidad': mp_info['unidad'], 'cantidad_base': cantidad_base,
+                    'precio_unitario': 0.0, 'cotizacion_usd': 1.0, 'materia_prima_id': mp_info['id'] 
                 })
                 st.success(f"Materia Prima '{mp_info['nombre']}' agregada con precio de la BD. Recalculando...")
                 st.rerun()
 
-    # ----------------------------------------------------
-    # TAB 2: MP NUEVA (Requiere precio manual en USD)
-    # ----------------------------------------------------
     with tab_nueva:
         st.markdown("**Ingrese una MP que NO está en la BD. Debe especificar el precio unitario en USD.**")
         with st.form("form_agregar_mp_nueva"):
             col_nombre, col_unidad = st.columns(2)
             mp_nombre = col_nombre.text_input("Nombre de la Materia Prima:", key="temp_nombre_nueva")
             mp_unidad = col_unidad.text_input("Unidad de Medida (kg, L, gr):", value="kg", key="temp_unidad_nueva")
-            
             col_cant, col_precio, col_cot = st.columns(3)
-            cantidad_base = col_cant.number_input(
-                "Cantidad Base (para 200L):",
-                min_value=0.0001,
-                value=1.0,
-                step=0.01,
-                format="%.4f",
-                key="temp_cantidad_nueva"
-            )
-            
-            # Precio Unitario Manual en USD
-            precio_unitario_usd = col_precio.number_input(
-                "Precio Unitario Manual (USD):",
-                min_value=0.01,
-                value=1.0,
-                step=0.01,
-                format="%.4f",
-                key="temp_precio_usd_nueva"
-            )
-            
-            cotizacion_usd = col_cot.number_input(
-                "Cotización USD de Compra:",
-                min_value=1.0,
-                value=cotizacion_dolar_actual,
-                step=0.1,
-                format="%.2f",
-                help="Cotización del dólar con la que se 'registró' esta compra (ARS/USD).",
-                key="temp_cot_usd_nueva"
-            )
+            cantidad_base = col_cant.number_input("Cantidad Base (para 200L):", min_value=0.0001, value=1.0, step=0.01, format="%.4f", key="temp_cantidad_nueva")
+            precio_unitario_usd = col_precio.number_input("Precio Unitario Manual (USD):", min_value=0.01, value=1.0, step=0.01, format="%.4f", key="temp_precio_usd_nueva")
+            cotizacion_usd = col_cot.number_input("Cotización USD de Compra:", min_value=1.0, value=cotizacion_dolar_actual, step=0.1, format="%.2f", help="Cotización del dólar con la que se 'registró' esta compra (ARS/USD).", key="temp_cot_usd_nueva")
             
             if st.form_submit_button("Agregar MP Nueva"):
                 if mp_nombre and cantidad_base > 0 and precio_unitario_usd > 0:
                     st.session_state.ingredientes_temporales.append({
-                        'nombre': mp_nombre,
-                        'unidad': mp_unidad,
-                        'cantidad_base': cantidad_base,
-                        # Guardamos el precio USD en el campo 'precio_unitario'
-                        'precio_unitario': precio_unitario_usd, 
-                        'cotizacion_usd': cotizacion_usd,
-                        'materia_prima_id': -1 # ID temporal para nueva MP
+                        'nombre': mp_nombre, 'unidad': mp_unidad, 'cantidad_base': cantidad_base,
+                        'precio_unitario': precio_unitario_usd, 'cotizacion_usd': cotizacion_usd, 'materia_prima_id': -1 
                     })
                     st.success(f"Materia Prima Temporal '{mp_nombre}' agregada (Precio USD). Recalculando...")
                     st.rerun()
