@@ -10,9 +10,9 @@ import calendar
 DB_PATH = "minerva.db"
 BASE_LITROS = 200.0 # Cantidad base de la receta original (Litros)
 # CONSTANTES CLAVE BASADAS EN LA LÓGICA DE PRESUPUESTO
-RECETAS_DIARIAS = 8.0 # <-- Nuevo valor fijo: 8 recetas diarias
+RECETAS_DIARIAS = 8.0 
 DIAS_HABILES_FIJOS_MENSUAL = 20.0 
-VOLUMEN_MENSUAL_AUTOMATICO = RECETAS_DIARIAS * DIAS_HABILES_FIJOS_MENSUAL * BASE_LITROS # 8 * 20 * 200 = 32000.0 L
+VOLUMEN_MENSUAL_AUTOMATICO = RECETAS_DIARIAS * DIAS_HABILES_FIJOS_MENSUAL * BASE_LITROS # 32000.0 L
 
 # =================================================================================================
 # UTILIDADES DB
@@ -44,36 +44,17 @@ def get_categoria_id_by_name(category_name):
         return None
     return df.iloc[0, 0]
 
-def get_costo_flete_ars():
-    """
-    Recupera el costo fijo de flete por receta (200L) desde la tabla 'gastos',
-    filtrando por el ID de categoría especial (FLETE_BASE_RECETA).
-    """
-    FLETE_CATEGORIA_ID_PARAMETRO = get_categoria_id_by_name('FLETE_BASE_RECETA')
-
-    if FLETE_CATEGORIA_ID_PARAMETRO is None:
-        return 0.0, "❌ Error de Configuración: La categoría 'FLETE_BASE_RECETA' no existe en la base de datos."
-        
-    query = f"""
-        SELECT importe_total 
-        FROM gastos 
-        WHERE categoria_id = {FLETE_CATEGORIA_ID_PARAMETRO}
-        LIMIT 1;
-    """
-    df_flete = fetch_df(query)
-    
-    if df_flete.empty:
-        return 0.0, f"❌ Error: No se encontró el registro de costo base de flete en la tabla 'gastos' con la Categoría ID {FLETE_CATEGORIA_ID_PARAMETRO}."
-        
-    return df_flete.iloc[0, 0], None
+# NOTA: get_costo_flete_ars() FUE ELIMINADA y su lógica reemplazada por input manual.
 
 def get_detalle_gastos_mensual(mes_simulacion, anio_simulacion):
     """
     Recupera el detalle de los gastos fijos para el mes y año seleccionado,
-    EXCLUYENDO el registro de parámetro de flete, y devuelve la suma total.
+    EXCLUYENDO el registro de parámetro de flete (si existe), y devuelve la suma total.
     """
     mes_str = f"{anio_simulacion:04d}-{mes_simulacion:02d}"
     
+    # Aseguramos que el FLETE_BASE_RECETA no se sume al Overhead, aunque ahora es manual, 
+    # si existía en la BD, podría distorsionar los gastos operativos.
     FLETE_CATEGORIA_ID_PARAMETRO = get_categoria_id_by_name('FLETE_BASE_RECETA')
 
     # Filtra la consulta solo si la categoría existe
@@ -99,6 +80,8 @@ def get_detalle_gastos_mensual(mes_simulacion, anio_simulacion):
 # =================================================================================================
 # FUNCIONES EXISTENTES (De costeo de MP)
 # =================================================================================================
+# (Estas funciones se mantienen sin cambios, gestionan el costo directo de la Materia Prima)
+# ...
 
 def obtener_todas_materias_primas(conn):
     """Obtiene la lista completa de materias primas disponibles con IDs."""
@@ -141,6 +124,8 @@ def obtener_precio_actual_materia_prima(conn, materia_prima_id):
     
     precio = cursor.fetchone()
     if precio:
+        # precio_unitario: Precio final en ARS con el que se registró la compra
+        # costo_flete, otros_costos: Costos directos por unidad de MP asociados a esa compra
         return precio['precio_unitario'], precio['costo_flete'], precio['otros_costos'], precio['cotizacion_usd']
     else:
         return 0.0, 0.0, 0.0, 1.0
@@ -163,8 +148,8 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
 
         precio_unitario_reg = 0.0
         cotizacion_usd_reg = 1.0
-        costo_flete = 0.0 
-        otros_costos = 0.0 
+        costo_flete_mp = 0.0 
+        otros_costos_mp = 0.0 
 
         if es_temporal_nueva and precio_manual > 0.0:
             precio_base_usd = precio_manual 
@@ -176,10 +161,10 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
             cotizacion_usd_reg = cotizacion_manual
             
         elif materia_prima_id != -1:
-            precio_unitario_reg, costo_flete, otros_costos, cotizacion_usd_reg = \
+            precio_unitario_reg, costo_flete_mp, otros_costos_mp, cotizacion_usd_reg = \
                 obtener_precio_actual_materia_prima(conn, materia_prima_id)
         else:
-            precio_unitario_reg, costo_flete, otros_costos, cotizacion_usd_reg = 0.0, 0.0, 0.0, 1.0
+            precio_unitario_reg, costo_flete_mp, otros_costos_mp, cotizacion_usd_reg = 0.0, 0.0, 0.0, 1.0
 
         # 2. Lógica de Dolarización
         costo_unitario_ars = 0.0
@@ -192,8 +177,8 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
             costo_unitario_ars = precio_unitario_reg
             moneda_origen = 'ARS (Fijo)'
 
-        # 3. Sumar costos asociados (Flete y Otros Costos ya están incluidos aquí)
-        costo_unitario_final_ars = costo_unitario_ars + costo_flete + otros_costos
+        # 3. Sumar costos asociados (Flete y Otros Costos de MP)
+        costo_unitario_final_ars = costo_unitario_ars + costo_flete_mp + otros_costos_mp
         costo_ingrediente_total = cantidad_usada * costo_unitario_final_ars
         
         detalle_costo.append({
@@ -202,7 +187,7 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
             "Cantidad (Simulada)": cantidad_usada,
             "Moneda Origen": moneda_origen,
             "Costo Unit. ARS (Base)": costo_unitario_ars,
-            "Flete / Otros MP": costo_flete + otros_costos, 
+            "Flete / Otros MP": costo_flete_mp + otros_costos_mp, 
             "Costo Unit. ARS (Total)": costo_unitario_final_ars,
             "Costo Total ARS": costo_ingrediente_total
         })
@@ -232,7 +217,8 @@ def main():
         st.session_state['litros'] = BASE_LITROS
         st.session_state['dolar'] = 1000.0
         st.session_state['gasto_fijo_mensual'] = 0.0 
-        st.session_state['flete_base_200l'] = 0.0
+        # FLETE BASE AHORA SE INICIALIZA EN 0 Y SE INGRESA MANUALMENTE
+        st.session_state['flete_base_200l'] = 5000.0 # Valor inicial sugerido
 
     conn = get_connection()
     
@@ -260,14 +246,22 @@ def main():
     if error_gasto: st.sidebar.warning(f"⚠️ {error_gasto}")
     
     # -----------------------------------------------------------
-    # 2. CÁLCULO AUTOMÁTICO DE FLETE BASE (200L)
+    # 2. COSTO DE FLETE BASE (200L) - INGRESO MANUAL
     # -----------------------------------------------------------
-    costo_flete_x_receta_ars, error_flete = get_costo_flete_ars()
-    st.session_state['flete_base_200l'] = costo_flete_x_receta_ars
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Costo de Flete General (Directo)")
     
-    st.sidebar.markdown(f"**Costo Flete Base por Receta ({BASE_LITROS:.0f}L):**")
-    st.sidebar.info(f"${costo_flete_x_receta_ars:,.2f} ARS (De Configuración BD)")
-    if error_flete: st.sidebar.warning(f"⚠️ {error_flete}")
+    costo_flete_x_receta_ars = st.sidebar.number_input(
+        f"Costo Flete Base por Receta ({BASE_LITROS:.0f}L) ARS:",
+        min_value=0.0,
+        value=st.session_state.get('flete_base_200l', 5000.0),
+        step=100.0,
+        format="%.2f",
+        key="flete_base_input",
+        help="Costo fijo de flete asociado a un batch base de 200L."
+    )
+    st.session_state['flete_base_200l'] = costo_flete_x_receta_ars
+
 
     st.sidebar.markdown("---")
     
@@ -434,7 +428,7 @@ def main():
     # CÁLCULO DEL GASTO INDIRECTO (OVERHEAD)
     gasto_indirecto_tanda = costo_indirecto_por_litro * cantidad_litros
     
-    # CÁLCULO DEL FLETE GENERAL (COMO COSTO DIRECTO)
+    # CÁLCULO DEL FLETE GENERAL (COMO COSTO DIRECTO) - USANDO VALOR MANUAL
     costo_flete_total_ars = st.session_state['flete_base_200l'] * factor_escala
     
     # CÁLCULO DEL COSTO TOTAL FINAL
@@ -459,7 +453,7 @@ def main():
     col_res2.metric(
         "Flete General (Escalado)",
         f"${costo_flete_total_ars:,.2f} ARS",
-        help=f"Costo Flete Base (200L): ${st.session_state['flete_base_200l']:,.2f} ARS"
+        help=f"Costo Flete Base ({BASE_LITROS:.0f}L, Manual): ${st.session_state['flete_base_200l']:,.2f} ARS"
     )
     col_res3.metric(
         "Gasto Indirecto Tanda (Overhead)",
