@@ -44,7 +44,8 @@ def fetch_df(query, params=()):
     try:
         df = pd.read_sql_query(query, conn, params=params)
     except sqlite3.Error as e:
-        st.error(f"Error al ejecutar la consulta: {e}")
+        # En el entorno de Streamlit, se debe usar st.error si el código se ejecuta en un servidor
+        # print(f"Error al ejecutar la consulta: {e}") 
         return pd.DataFrame()
     finally:
         conn.close()
@@ -65,20 +66,12 @@ def get_detalle_gastos_mensual(mes_simulacion, anio_simulacion):
     """
     mes_str = f"{anio_simulacion:04d}-{mes_simulacion:02d}"
     
-    # Aseguramos que el FLETE_BASE_RECETA no se sume al Overhead, aunque ahora es manual, 
-    # si existía en la BD, podría distorsionar los gastos operativos.
-    FLETE_CATEGORIA_ID_PARAMETRO = get_categoria_id_by_name('FLETE_BASE_RECETA')
-
-    # Filtra la consulta solo si la categoría existe
-    filtro_flete = f"AND g.categoria_id != {FLETE_CATEGORIA_ID_PARAMETRO}" if FLETE_CATEGORIA_ID_PARAMETRO is not None else ""
-    
     query = f"""
         SELECT 
             g.importe_total AS Importe_ARS
         FROM gastos g
         JOIN categorias_imputacion c ON g.categoria_id = c.id
         WHERE (g.fecha_pago LIKE '{mes_str}-%' OR g.fecha_factura LIKE '{mes_str}-%')
-           {filtro_flete} 
     """
     df_gastos = fetch_df(query)
     
@@ -101,12 +94,14 @@ def create_tables_if_not_exists(conn):
     """)
     
     # Tabla Presupuestos (Guarda el resultado final de la simulación para un cliente)
+    # CORRECCIÓN: Uso de -- para comentarios en SQL para evitar sqlite3.OperationalError: unrecognized token: "#"
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS presupuestos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cliente_id INTEGER NOT NULL,
             fecha TEXT NOT NULL,
-            porcentaje_ganancia REAL NOT NULL,
+            -- Se mantiene este campo aunque el margen sea por producto, para referencia global
+            porcentaje_ganancia REAL NOT NULL, 
             volumen_total_litros REAL NOT NULL,
             costo_total_ars REAL NOT NULL,
             precio_final_ars REAL NOT NULL,
@@ -138,7 +133,7 @@ def save_presupuesto(conn, cliente_id, porcentaje_ganancia, volumen_total_litros
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (cliente_id, fecha_hoy, porcentaje_ganancia, volumen_total_litros, costo_total_ars, precio_final_ars, detalle_simulaciones_json))
     conn.commit()
-    return cursor.lastrowid
+    return cursor.lastrowid # CORRECCIÓN: Usar lastrowid en lugar de lastid
 
 # =================================================================================================
 # FUNCIONES DE COSTEO DE MATERIA PRIMA 
@@ -202,6 +197,18 @@ def obtener_precio_actual_materia_prima(conn, materia_prima_id):
             # Retorna el precio en USD y la cotización registrada
             return precio_base, costo_flete, otros_costos, cotizacion_usd_reg
     else:
+        # En el caso de no encontrar en 'compras_materia_prima', intentar 'precios_materias_primas'
+        cursor.execute("""
+            SELECT precio_unitario, costo_flete, otros_costos, cotizacion_usd
+            FROM precios_materias_primas
+            WHERE materia_prima_id = ?
+            ORDER BY fecha DESC
+            LIMIT 1
+        """, (materia_prima_id,))
+        precio = cursor.fetchone()
+        if precio:
+            return precio['precio_unitario'], precio['costo_flete'], precio['otros_costos'], precio['cotizacion_usd']
+        
         return 0.0, 0.0, 0.0, 1.0
 
 def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
@@ -244,7 +251,7 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
                 costo_unitario_ars_registrado = precio_manual_unitario
         
         elif materia_prima_id != -1:
-            # Caso 2: MP de la Base de Datos (compras_materia_prima)
+            # Caso 2: MP de la Base de Datos (compras_materia_prima o precios_materias_primas)
             precio_unitario_reg_base, _, _, cotizacion_usd_reg_bd = \
                 obtener_precio_actual_materia_prima(conn, materia_prima_id)
             
@@ -323,7 +330,6 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
     costo_mp_total = detalle_df["Costo Total ARS"].sum() 
     
     # Retornamos los costos desagregados
-    # CORRECCIÓN: Se cambia detalle_costo_df a detalle_df
     return costo_mp_total, detalle_df, costo_total_mp_ars, costo_total_recargo_mp_ars
 # ***************************************************************************************************
 
@@ -348,12 +354,10 @@ def generate_pdf_reportlab(data):
     precio_unitario_ars_litro_AVG = data['precio_unitario_ars_litro'] 
     precio_final_ars = data['precio_final_ars']
     litros_total_acumulado = data['litros_total_acumulado']
-    sim_df = data['simulaciones_presupuesto_df'].copy()
     
-    # NUEVO: Obtener el porcentaje de ganancia para aplicar por ítem
-    porcentaje_ganancia = data['porcentaje_ganancia']
-    factor_ganancia = 1 + (porcentaje_ganancia / 100.0)
-
+    # **IMPORTANTE: Usamos el DF FINAL CALCULADO CON MARGENES INDIVIDUALES**
+    df_detalle_final = data['df_detalle_final_presupuesto'].copy()
+    
     # CÁLCULOS EN USD (Final summary only)
     precio_unitario_usd_litro_AVG = precio_unitario_ars_litro_AVG / cotizacion_dolar_actual
     precio_final_usd = precio_final_ars / cotizacion_dolar_actual
@@ -361,12 +365,10 @@ def generate_pdf_reportlab(data):
     # 2. Configuración de ReportLab
     buffer = io.BytesIO()
     
-    # ***************************************************************
     # CORRECCIÓN PARA ORIENTACIÓN HORIZONTAL
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), # <--- CAMBIO CLAVE
                             leftMargin=0.8*inch, rightMargin=0.8*inch,
                             topMargin=0.8*inch, bottomMargin=0.8*inch)
-    # ***************************************************************
     
     story = []
     styles = getSampleStyleSheet()
@@ -396,47 +398,40 @@ def generate_pdf_reportlab(data):
     table_data.append([
         "Producto", 
         "Cantidad (Litros)", 
-        "Precio x Litro(ARS/L)", 
-        "Precio x Litro(USD/L)", 
+        "Margen (%)", # Nuevo
+        "Precio x Litro Cliente (ARS/L)", 
+        "Precio x Litro Cliente (USD/L)", 
         "Total a Pagar (ARS)",
         "Total a Pagar (USD)" 
     ])
     
     # Body - CÁLCULO INDIVIDUAL POR ÍTEM
     # Se ajusta el ancho de las columnas para la nueva orientación horizontal (A4 ~ 11.69 pulgadas)
-    total_width = 11.1 * inch 
+    total_width = 10.1 * inch 
     
-    # ColWidths: [1.8in (Producto), 1.2in (Cantidad), 1.7in (P. Litro ARS), 1.7in (P. Litro USD), 1.9in (Total ARS), 1.9in (Total USD)]
-    col_widths = [total_width * 0.22, total_width * 0.12, total_width * 0.18, total_width * 0.18, total_width * 0.18, total_width * 0.18]
+    # ColWidths: [1.6in (Producto), 1.0in (Cantidad), 1.0in (Margen), 1.7in (P. Litro ARS), 1.7in (P. Litro USD), 1.55in (Total ARS), 1.55in (Total USD)]
+    col_widths = [total_width * 0.16, total_width * 0.10, total_width * 0.10, total_width * 0.18, total_width * 0.18, total_width * 0.14, total_width * 0.14]
 
 
-    for index, row in sim_df.iterrows():
+    # Iteramos sobre el DataFrame de Detalle Final (que ya tiene todos los cálculos)
+    for index, row in df_detalle_final.iterrows():
         
-        # El 'costo_por_litro_ars' es el costo unitario de producción individual de esa receta
-        costo_unitario_produccion_ars = row['costo_por_litro_ars']
-        
-        # 1. Precio Unitario Final al Cliente (ARS) = Costo * Factor_Ganancia
-        precio_unitario_cliente_ars = costo_unitario_produccion_ars * factor_ganancia
-        
-        # 2. Precio Unitario Final al Cliente (USD)
-        precio_unitario_cliente_usd = precio_unitario_cliente_ars / cotizacion_dolar_actual
-        
-        # 3. Total a Pagar por el Ítem (ARS)
-        # CORRECCIÓN: Se usa 'Litros' con L mayúscula
-        total_a_pagar_ars = row['Litros'] * precio_unitario_cliente_ars 
-        
-        # 4. Total a Pagar por el Ítem (USD)
-        # CORRECCIÓN: Se usa 'Litros' con L mayúscula
-        total_a_pagar_usd = row['Litros'] * precio_unitario_cliente_usd 
+        # Obtenemos los valores finales calculados en el main
+        precio_unitario_cliente_ars = row['Precio_Venta_Unitario_ARS']
+        precio_unitario_cliente_usd = row['Precio_Venta_Unitario_USD']
+        total_a_pagar_ars = row['Precio_Venta_Total_ARS']
+        # ESTA COLUMNA EXISTE GRACIAS A LA CORRECCIÓN EN main()
+        total_a_pagar_usd = row['Precio_Venta_Total_USD'] 
 
-        # 5. Añadir a la tabla
+        # Añadir a la tabla
         table_data.append([
-            row['Receta'], # Usamos 'Receta' en lugar de 'nombre_receta' ya que viene de df_resumen
-            f"{row['Litros']:,.2f} L", # CORRECCIÓN: 'Litros' con L mayúscula
-            f"${precio_unitario_cliente_ars:,.2f}", # PRECIO UNITARIO ARS INDIVIDUAL
-            f"USD ${precio_unitario_cliente_usd:,.2f}", # PRECIO UNITARIO USD INDIVIDUAL
+            row['Receta'], 
+            f"{row['Litros']:,.2f} L", 
+            f"{row['Margen_Ganancia']:.2f} %", # Nuevo margen individual
+            f"${precio_unitario_cliente_ars:,.2f}", 
+            f"USD ${precio_unitario_cliente_usd:,.2f}", 
             f"${total_a_pagar_ars:,.2f}",
-            f"USD ${total_a_pagar_usd:,.2f}" # TOTAL USD INDIVIDUAL
+            f"USD ${total_a_pagar_usd:,.2f}" 
         ])
     
     # Creación de la tabla y estilos
@@ -456,11 +451,11 @@ def generate_pdf_reportlab(data):
     story.append(table)
     story.append(Spacer(1, 0.5*inch))
     
-    # 6. Totales Finales
-    #story.append(Paragraph(f"**Volumen Total del Pedido:** {litros_total_acumulado:,.2f} Litros", styles['BodyTextBold']))
+    # 6. Totales Finales (Totales Globales)
+    story.append(Paragraph(f"**Volumen Total del Pedido:** {litros_total_acumulado:,.2f} Litros", styles['BodyTextBold']))
     
     # Usamos los promedios del resumen final (AVG)
-    #story.append(Paragraph(f"**Precio Promedio por Litro a Pagar (Cliente):** ${precio_unitario_ars_litro_AVG:,.2f} ARS/L (USD ${precio_unitario_usd_litro_AVG:,.2f}/L)", styles['BodyTextBold']))
+    story.append(Paragraph(f"**Precio Promedio por Litro a Pagar (Cliente):** ${precio_unitario_ars_litro_AVG:,.2f} ARS/L (USD ${precio_unitario_usd_litro_AVG:,.2f}/L)", styles['BodyTextBold']))
     
     story.append(Spacer(1, 0.1*inch))
     
@@ -778,7 +773,6 @@ def main():
     ingredientes_a_calcular = ingredientes_df[~ingredientes_df['Quitar']].copy()
     
     # Costo SÓLO de Materia Prima (Incluye Recargo 3% USD)
-    # Corrección: Se espera 'detalle_df' como segundo retorno
     costo_mp_total, detalle_costo_df, costo_mp_base_ars, costo_recargo_mp_ars = calcular_costo_total(
         ingredientes_a_calcular, 
         cotizacion_dolar_actual, 
@@ -910,12 +904,12 @@ def main():
     # ***************************************************************************************************
     
     # --------------------------------------------------------------------------------------
-    # NUEVA SECCIÓN: GESTIÓN DE SIMULACIONES PARA PRESUPUESTO
+    # SECCIÓN: GESTIÓN DE SIMULACIONES PARA PRESUPUESTO
     # --------------------------------------------------------------------------------------
     st.markdown("---")
     st.header("🛒 Agregar Simulación al Presupuesto")
     
-    col_cant_add, col_button_add = st.columns([0.3, 0.7])
+    col_cant_add, col_margen_add, col_button_add = st.columns([0.3, 0.3, 0.4])
     
     # CAMBIO 1: Entrada para la cantidad de tandas/simulaciones
     cantidad_a_agregar = col_cant_add.number_input(
@@ -924,6 +918,16 @@ def main():
         value=1,
         step=1,
         key="cantidad_a_agregar_input"
+    )
+    
+    # CAMBIO 2: Margen de Ganancia inicial para el producto
+    margen_ganancia_inicial = col_margen_add.number_input(
+        "Margen Inicial (%):", 
+        min_value=0.0, 
+        value=30.0, 
+        step=1.0, 
+        format="%.2f",
+        key="margen_inicial_input"
     )
 
     if col_button_add.button(f"➕ Agregar '{receta_seleccionada_nombre}' (x{cantidad_a_agregar}) al Presupuesto", use_container_width=True):
@@ -951,8 +955,8 @@ def main():
             # Multiplicamos los costos indirectos/fletes por la cantidad_a_agregar
             'gasto_indirecto_tanda': gasto_indirecto_tanda * cantidad_a_agregar,
             'costo_flete_total_ars': costo_flete_total_ars * cantidad_a_agregar,
-            # El detalle MP JSON DEBE ser del original para poder ser reconstruido, 
-            # pero es complicado. Lo guardaremos como una simulación escalada simple:
+            # Nuevo: Margen de Ganancia para este producto/simulación
+            'margen_ganancia': margen_ganancia_inicial, 
             'cantidad_tandas': cantidad_a_agregar,
             'detalle_mp_json_unitario': detalle_costo_df.to_json(orient='records'),
         }
@@ -961,19 +965,19 @@ def main():
         st.session_state['simulaciones_presupuesto'].append(simulacion_data)
         # Limpiar la data de impresión para forzar la re-generación
         st.session_state['presupuesto_data_for_print'] = {}
-        st.success(f"Simulación de {receta_seleccionada_nombre} (x{cantidad_a_agregar}) agregada. Total de items: {len(st.session_state['simulaciones_presupuesto'])}")
+        st.success(f"Simulación de {receta_seleccionada_nombre} (x{cantidad_a_agregar}) agregada con Margen Inicial del {margen_ganancia_inicial:.2f}%. Total de items: {len(st.session_state['simulaciones_presupuesto'])}")
         st.rerun()
         
     st.markdown("---")
     
     # --------------------------------------------------------------------------------------
-    # NUEVA SECCIÓN: GENERACIÓN DE PRESUPUESTO FINAL
+    # SECCIÓN: GENERACIÓN DE PRESUPUESTO FINAL (CON MARGEN INDIVIDUAL EDITABLE)
     # --------------------------------------------------------------------------------------
     st.header("📄 Generar Presupuesto Final")
 
     # Muestra de resumen de simulaciones cargadas
     if st.session_state['simulaciones_presupuesto']:
-        st.subheader("Simulaciones Cargadas:")
+        st.subheader("Simulaciones Cargadas: (Edite el Margen de Ganancia Individual)")
         
         datos_resumen = []
         costo_total_acumulado = 0.0
@@ -986,46 +990,62 @@ def main():
                 'Tandas': sim['cantidad_tandas'],
                 'Litros': sim['litros'],
                 'Costo Total ARS': sim['costo_total_ars'],
-                # Agregamos costo por litro al resumen para poder ser usado en el PDF
-                'costo_por_litro_ars': sim['costo_por_litro_ars'] 
+                'costo_por_litro_ars': sim['costo_por_litro_ars'],
+                # CORRECCIÓN CLAVE: Usamos un nombre de columna claro para el usuario
+                'Margen de Ganancia (%)': sim['margen_ganancia'] 
             })
-            costo_total_acumulado += sim['costo_total_ars']
-            litros_total_acumulado += sim['litros']
             
+        # Creamos el DataFrame y lo ponemos en el editor de datos para que el usuario pueda cambiar el margen
         df_resumen = pd.DataFrame(datos_resumen)
-        st.dataframe(
-            df_resumen[['ID', 'Receta', 'Tandas', 'Litros', 'Costo Total ARS']], # Mostramos sólo las columnas visibles
+        
+        # Guardamos el DF en el state para poder acceder al margen editado
+        st.session_state['df_resumen_editable'] = df_resumen
+
+        # Configuración para el editor de datos
+        col_config_resumen = {
+            'ID': st.column_config.NumberColumn(disabled=True),
+            'Receta': st.column_config.TextColumn(disabled=True),
+            'Tandas': st.column_config.NumberColumn(format="%.0f", disabled=True),
+            'Litros': st.column_config.NumberColumn(format="%.2f", disabled=True),
+            'Costo Total ARS': st.column_config.NumberColumn(format="$%f", disabled=True),
+            # CORRECCIÓN CLAVE: El nombre de la columna en el editor debe coincidir
+            'Margen de Ganancia (%)': st.column_config.NumberColumn( 
+                "Margen de Ganancia (%)", 
+                min_value=0.0, 
+                format="%.2f",
+                help="Margen de ganancia específico para este producto."
+            ),
+        }
+        
+        # CORRECCIÓN CLAVE: Usamos el nuevo nombre de columna para mostrar y editar
+        edited_df_resumen = st.data_editor(
+            df_resumen[['ID', 'Receta', 'Tandas', 'Litros', 'Costo Total ARS', 'Margen de Ganancia (%)']],
             hide_index=True, 
             use_container_width=True,
-            column_config={
-                'Tandas': st.column_config.NumberColumn(format="%.0f"),
-                'Litros': st.column_config.NumberColumn(format="%.2f"),
-                'Costo Total ARS': st.column_config.NumberColumn(format="$%f"),
-            }
+            column_config=col_config_resumen,
+            key="df_resumen_editor"
         )
-
-        st.markdown(f"**Costo Total Acumulado (ARS):** ${costo_total_acumulado:,.2f}")
+        
+        # Sincronizar el estado de la sesión con el DF editado
+        st.session_state['df_resumen_editable'] = edited_df_resumen.copy()
+        
+        # Recalcular Acumulados
+        costo_total_acumulado = edited_df_resumen['Costo Total ARS'].sum()
+        litros_total_acumulado = edited_df_resumen['Litros'].sum()
+        
+        # Mostrar totales sin el precio final
+        st.markdown(f"**Costo Total Acumulado de Producción (ARS):** ${costo_total_acumulado:,.2f}")
         st.markdown(f"**Volumen Total (Litros):** {litros_total_acumulado:,.2f} L")
         st.markdown("---")
 
         # --- FORMULARIO DE GENERACIÓN DE PRESUPUESTO ---
-        # Se asegura que la lógica de guardado y presentación esté dentro de un form 
-        # que solo usa st.form_submit_button
         with st.form("form_presupuesto_final"):
-            st.subheader("Datos del Presupuesto")
+            st.subheader("Datos del Presupuesto (Guardado)")
             
             # 1. Ingreso del Cliente
             cliente_nombre = st.text_input("Nombre del Cliente:", key="cliente_nombre_input")
             
-            # 2. Porcentaje de Ganancia
-            porcentaje_ganancia = st.number_input(
-                "Porcentaje de Ganancia (%):", 
-                min_value=0.0, 
-                value=30.0, 
-                step=1.0, 
-                format="%.2f",
-                key="porcentaje_ganancia_input"
-            )
+            # EL CONTROL 'Margen Promedio a Guardar en BD (%)' FUE ELIMINADO
             
             submitted = st.form_submit_button("Generar y Guardar Presupuesto")
             
@@ -1033,62 +1053,121 @@ def main():
                 if not cliente_nombre:
                     st.error("Debe ingresar el nombre del cliente.")
                 else:
-                    # CÁLCULO FINAL Y PRESENTACIÓN
+                    # -----------------------------------------------------------------
+                    # CÁLCULO FINAL DETALLADO (USANDO MÁRGENES INDIVIDUALES)
+                    # -----------------------------------------------------------------
                     
-                    # Cálculo del precio de venta (GLOBAL)
-                    ganancia_ars = costo_total_acumulado * (porcentaje_ganancia / 100.0)
-                    precio_final_ars = costo_total_acumulado + ganancia_ars
+                    df_final = st.session_state['df_resumen_editable'].copy()
                     
-                    # CÁLCULO DEL PRECIO UNITARIO PROMEDIO (Para el resumen final, NO para la tabla)
-                    precio_unitario_ars_litro = precio_final_ars / litros_total_acumulado
-                    precio_unitario_usd_litro = precio_unitario_ars_litro / cotizacion_dolar_actual
+                    # CORRECCIÓN CLAVE: Renombramos la columna editada para que la lógica de cálculo la reconozca
+                    df_final.rename(columns={'Margen de Ganancia (%)': 'Margen_Ganancia'}, inplace=True)
+                    
+                    # 1. Aplicar la ganancia por producto
+                    df_final['Factor_Ganancia'] = 1 + (df_final['Margen_Ganancia'] / 100.0)
+                    
+                    # 2. Calcular Venta Total por producto
+                    df_final['Precio_Venta_Total_ARS'] = df_final['Costo Total ARS'] * df_final['Factor_Ganancia']
+                    
+                    # 🚀 CORRECCIÓN CLAVE: Agregar el cálculo del Precio de Venta Total en USD
+                    df_final['Precio_Venta_Total_USD'] = df_final['Precio_Venta_Total_ARS'] / cotizacion_dolar_actual 
+                    
+                    # 3. Calcular la Ganancia Total y Precio Final Acumulado
+                    ganancia_total_ars = df_final['Precio_Venta_Total_ARS'].sum() - costo_total_acumulado
+                    precio_final_ars_total = df_final['Precio_Venta_Total_ARS'].sum()
+                    
+                    # 4. Calcular Unitarios (para la vista y el PDF)
+                    df_final['Precio_Venta_Unitario_ARS'] = df_final['Precio_Venta_Total_ARS'] / df_final['Litros']
+                    df_final['Precio_Venta_Unitario_USD'] = df_final['Precio_Venta_Unitario_ARS'] / cotizacion_dolar_actual
+                    df_final['Costo_Unitario_ARS'] = df_final['Costo Total ARS'] / df_final['Litros'] # Costo unitario real
+
+                    # -----------------------------------------------------------------
+                    
+                    # CÁLCULOS GLOBALES (Para el Resumen y Guardado en BD)
+                    precio_unitario_ars_litro_AVG = precio_final_ars_total / litros_total_acumulado
                     
                     # 1. Guardar en la Base de Datos
                     try:
                         cliente_id = get_or_create_client(conn, cliente_nombre)
                         
-                        # Almacenamos el DataFrame de simulaciones como JSON para la BD
-                        detalle_simulaciones_json = json.dumps(st.session_state['simulaciones_presupuesto'])
+                        # Almacenamos el DataFrame final (incluye márgenes y precios) como JSON para la BD
+                        detalle_simulaciones_json = df_final.to_json(orient='records')
                         
+                        # AJUSTE: Usamos un valor fijo para el margen global, ya que el campo fue eliminado
+                        porcentaje_ganancia_global_bd = 30.0 
+                        
+                        # Usamos el margen global de referencia para el campo 'porcentaje_ganancia'
                         presupuesto_id = save_presupuesto(
                             conn, 
                             cliente_id, 
-                            porcentaje_ganancia, 
+                            porcentaje_ganancia_global_bd, # Usamos el valor fijo
                             litros_total_acumulado, 
                             costo_total_acumulado, 
-                            precio_final_ars,
+                            precio_final_ars_total,
                             detalle_simulaciones_json
                         )
                         st.success(f"✅ Presupuesto Guardado (ID: {presupuesto_id}) para el Cliente: {cliente_nombre}.")
                         
-                        # 2. Presentar al Cliente (en el formulario)
+                        # 2. Presentación Final (NUEVA VISTA DETALLADA)
                         st.subheader(f"📊 Presentación Final para {cliente_nombre}")
                         
+                        # Mostrar la tabla de detalle por producto
+                        st.markdown("**Detalle de Venta por Producto**")
+                        
+                        # NOTA: df_final['Margen_Ganancia'] es la columna renombrada de 'Margen de Ganancia (%)'
+                        df_presentacion = df_final[['Receta', 'Litros', 'Costo Total ARS', 'Margen_Ganancia', 
+                                                    'Precio_Venta_Total_ARS', 'Precio_Venta_Unitario_ARS']].copy()
+                        df_presentacion.rename(columns={
+                            'Costo Total ARS': 'Costo_Total_ARS',
+                            'Margen_Ganancia': 'Margen_Aplicado (%)',
+                            'Precio_Venta_Total_ARS': 'Venta_Total_ARS',
+                            'Precio_Venta_Unitario_ARS': 'Venta_Unitario_ARS/L'
+                        }, inplace=True)
+                        
+                        # Calculamos la Ganancia por Producto para la vista
+                        df_presentacion['Ganancia_ARS'] = df_presentacion['Venta_Total_ARS'] - df_presentacion['Costo_Total_ARS']
+                        
+                        # Reordenamos columnas para la vista
+                        df_presentacion = df_presentacion[['Receta', 'Litros', 'Costo_Total_ARS', 'Margen_Aplicado (%)', 'Ganancia_ARS', 'Venta_Total_ARS', 'Venta_Unitario_ARS/L']]
+
+                        st.dataframe(
+                            df_presentacion,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                'Litros': st.column_config.NumberColumn(format="%.2f"),
+                                'Costo_Total_ARS': st.column_config.NumberColumn(format="$%f"),
+                                'Margen_Aplicado (%)': st.column_config.NumberColumn(format="%.2f"),
+                                'Ganancia_ARS': st.column_config.NumberColumn(format="$%f"),
+                                'Venta_Total_ARS': st.column_config.NumberColumn(format="$%f"),
+                                'Venta_Unitario_ARS/L': st.column_config.NumberColumn(format="$%.2f"),
+                            }
+                        )
+
+                        # Totales Globales
+                        st.markdown("---")
                         col_costo, col_ganancia, col_venta = st.columns(3)
                         col_costo.metric("Costo Total Producción", f"${costo_total_acumulado:,.2f} ARS")
-                        col_ganancia.metric(f"Ganancia ({porcentaje_ganancia:.2f}%)", f"${ganancia_ars:,.2f} ARS")
-                        col_venta.metric("Precio Venta Total", f"${precio_final_ars:,.2f} ARS", delta="FINAL")
+                        col_ganancia.metric("Ganancia Total Aplicada", f"${ganancia_total_ars:,.2f} ARS")
+                        col_venta.metric("Precio Venta Total", f"${precio_final_ars_total:,.2f} ARS", delta="FINAL")
 
                         st.markdown("---")
                         st.subheader(f"Precio Unitario Final (Promedio de {litros_total_acumulado:,.2f} L)")
                         
                         col_litro_ars, col_litro_usd = st.columns(2)
-                        col_litro_ars.metric("Precio por Litro (ARS/L)", f"${precio_unitario_ars_litro:,.2f} ARS/L")
-                        col_litro_usd.metric("Precio por Litro (USD/L)", f"USD ${precio_unitario_usd_litro:,.2f} USD/L")
+                        col_litro_ars.metric("Precio por Litro (ARS/L)", f"${precio_unitario_ars_litro_AVG:,.2f} ARS/L")
+                        col_litro_usd.metric("Precio por Litro (USD/L)", f"USD ${precio_unitario_ars_litro_AVG / cotizacion_dolar_actual:,.2f} USD/L")
                         
                         # Guardar la data en el session state para la función de impresión
                         st.session_state['presupuesto_data_for_print'] = {
                             'cliente_nombre': cliente_nombre,
                             'costo_total_acumulado': costo_total_acumulado,
-                            'ganancia_ars': ganancia_ars,
-                            'precio_final_ars': precio_final_ars,
+                            'ganancia_ars': ganancia_total_ars, # Ganancia total
+                            'precio_final_ars': precio_final_ars_total, # Precio final total
                             'litros_total_acumulado': litros_total_acumulado,
-                            # NOTA: Estos son los promedios, pero se usan solo para el resumen fuera de la tabla
-                            'precio_unitario_ars_litro': precio_unitario_ars_litro, 
-                            'precio_unitario_usd_litro': precio_unitario_usd_litro,
-                            'porcentaje_ganancia': porcentaje_ganancia,
-                            # Pasamos el DF_RESUMEN que ahora tiene 'costo_por_litro_ars'
-                            'simulaciones_presupuesto_df': df_resumen, 
+                            'precio_unitario_ars_litro': precio_unitario_ars_litro_AVG, # Promedio
+                            'porcentaje_ganancia': porcentaje_ganancia_global_bd, # Margen de referencia (valor fijo)
+                            # NUEVO: Pasamos el DF_FINAL con todos los detalles de venta
+                            'df_detalle_final_presupuesto': df_final, 
                             'cotizacion_dolar_actual': cotizacion_dolar_actual,
                             'presupuesto_id': presupuesto_id
                         }
