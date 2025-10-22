@@ -8,13 +8,13 @@ import base64
 import io
 
 # =================================================================================================
-# IMPORTACIONES REPORTLAB (NUEVAS)
+# IMPORTACIONES REPORTLAB 
 # =================================================================================================
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, landscape # Importamos landscape 
+from reportlab.lib.pagesizes import A4, landscape 
 
 
 # =================================================================================================
@@ -34,7 +34,6 @@ VOLUMEN_MENSUAL_AUTOMATICO = RECETAS_DIARIAS * DIAS_HABILES_FIJOS_MENSUAL * BASE
 def get_connection():
     """Establece la conexión a la base de datos."""
     conn = sqlite3.connect(DB_PATH)
-    # Corrección: Uso correcto de sqlite3.Row
     conn.row_factory = sqlite3.Row 
     return conn
 
@@ -59,27 +58,8 @@ def get_categoria_id_by_name(category_name):
         return None
     return df.iloc[0, 0]
 
-def get_detalle_gastos_mensual(mes_simulacion, anio_simulacion):
-    """
-    Recupera el detalle de los gastos fijos para el mes y año seleccionado,
-    EXCLUYENDO el registro de parámetro de flete (si existe), y devuelve la suma total.
-    """
-    mes_str = f"{anio_simulacion:04d}-{mes_simulacion:02d}"
-    
-    query = f"""
-        SELECT 
-            g.importe_total AS Importe_ARS
-        FROM gastos g
-        JOIN categorias_imputacion c ON g.categoria_id = c.id
-        WHERE (g.fecha_pago LIKE '{mes_str}-%' OR g.fecha_factura LIKE '{mes_str}-%')
-    """
-    df_gastos = fetch_df(query)
-    
-    if df_gastos.empty:
-        return 0.0, "No se encontraron gastos fijos para este mes (excluyendo Flete)."
-    
-    total_gasto = df_gastos['Importe_ARS'].sum()
-    return total_gasto, None
+# NOTA: La función 'get_detalle_gastos_mensual' fue eliminada ya que el total ahora se calcula
+# directamente desde el st.data_editor en el sidebar.
 
 def create_tables_if_not_exists(conn):
     """Crea las tablas de Clientes y Presupuestos si no existen."""
@@ -93,14 +73,12 @@ def create_tables_if_not_exists(conn):
         )
     """)
     
-    # Tabla Presupuestos (Guarda el resultado final de la simulación para un cliente)
-    # CORRECCIÓN: Uso de -- para comentarios en SQL para evitar sqlite3.OperationalError: unrecognized token: "#"
+    # Tabla Presupuestos
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS presupuestos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cliente_id INTEGER NOT NULL,
             fecha TEXT NOT NULL,
-            -- Se mantiene este campo aunque el margen sea por producto, para referencia global
             porcentaje_ganancia REAL NOT NULL, 
             volumen_total_litros REAL NOT NULL,
             costo_total_ars REAL NOT NULL,
@@ -133,10 +111,35 @@ def save_presupuesto(conn, cliente_id, porcentaje_ganancia, volumen_total_litros
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (cliente_id, fecha_hoy, porcentaje_ganancia, volumen_total_litros, costo_total_ars, precio_final_ars, detalle_simulaciones_json))
     conn.commit()
-    return cursor.lastrowid # CORRECCIÓN: Usar lastrowid en lugar de lastid
+    return cursor.lastrowid 
+
 
 # =================================================================================================
-# FUNCIONES DE COSTEO DE MATERIA PRIMA 
+# UTILIDAD DB: GASTOS OPERATIVOS
+# =================================================================================================
+
+def get_detalle_gastos_operativos_mensual(mes: int, anio: int):
+    """Obtiene el detalle de gastos operativos para un mes y año específico."""
+    query = f"""
+    SELECT
+        g.fecha_factura AS Fecha,
+        ci.nombre AS Categoria,
+        g.beneficiario_nombre AS Beneficiario,
+        g.importe_total AS Monto_ARS
+    FROM
+        gastos g
+    JOIN
+        categorias_imputacion ci ON g.categoria_id = ci.id
+    WHERE
+        strftime('%Y', g.fecha_factura) = '{anio}' AND strftime('%m', g.fecha_factura) = '{mes:02d}'
+    ORDER BY
+        g.fecha_factura, ci.nombre;
+    """
+    df_gastos = fetch_df(query) 
+    return df_gastos
+
+# =================================================================================================
+# FUNCIONES DE COSTEO DE MATERIA PRIMA (SIN CAMBIOS EN LA LÓGICA)
 # =================================================================================================
 
 def obtener_todas_materias_primas(conn):
@@ -164,13 +167,12 @@ def obtener_ingredientes_receta(conn, receta_id):
 
 def obtener_precio_actual_materia_prima(conn, materia_prima_id):
     """
-    Obtiene el último precio unitario, flete, otros costos y la cotización USD registrada.
+    Obtiene el último precio unitario y la cotización USD registrada.
     """
     if materia_prima_id == -1:
         return 0.0, 0.0, 0.0, 1.0
 
     cursor = conn.cursor()
-    # Usamos la tabla compras_materia_prima para una mejor coherencia en la lógica
     cursor.execute("""
         SELECT precio_unitario, cotizacion_usd, moneda
         FROM compras_materia_prima
@@ -182,22 +184,16 @@ def obtener_precio_actual_materia_prima(conn, materia_prima_id):
     compra = cursor.fetchone()
     if compra:
         precio_base = compra['precio_unitario']
-        # Los costos asociados de la BD se ignoran ahora (Flete/Otros Unitarios)
         costo_flete = 0.0 
         otros_costos = 0.0 
         cotizacion_usd_reg = compra['cotizacion_usd'] if compra['cotizacion_usd'] is not None else 1.0
         moneda = compra['moneda']
         
-        # Si la moneda es ARS y la cotización no se usó/registró, asumimos que el precio es ARS final.
         if moneda == 'ARS' and cotizacion_usd_reg <= 1.0:
-            # Retorna el precio en ARS y cotización 1.0 (no dolarizado)
             return precio_base, costo_flete, otros_costos, 1.0
         else:
-            # Si es USD o tiene cotización registrada, el precio_unitario es el USD base.
-            # Retorna el precio en USD y la cotización registrada
             return precio_base, costo_flete, otros_costos, cotizacion_usd_reg
     else:
-        # En el caso de no encontrar en 'compras_materia_prima', intentar 'precios_materias_primas'
         cursor.execute("""
             SELECT precio_unitario, costo_flete, otros_costos, cotizacion_usd
             FROM precios_materias_primas
@@ -214,14 +210,11 @@ def obtener_precio_actual_materia_prima(conn, materia_prima_id):
 def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
     """
     Calcula el costo total SÓLO de la Materia Prima en ARS.
-    MODIFICADO: Se agregan columnas de detalle en USD para la visualización.
     """
     detalle_costo = []
     
-    # CONSTANTE DEL NUEVO RECARGO
     RECARGO_FIJO_USD_PERCENT = 0.03 # 3%
     
-    # NUEVAS VARIABLES DE AGREGACIÓN
     costo_total_mp_ars = 0.0
     costo_total_recargo_mp_ars = 0.0 
     
@@ -230,7 +223,6 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
         cantidad_usada = ingrediente["cantidad_simulada"]
         nombre_mp = ingrediente["Materia Prima"]
         
-        # 1. Obtener precios registrados/manuales
         precio_manual_unitario = ingrediente.get('precio_unitario_manual', 0.0)
         cotizacion_manual = ingrediente.get('cotizacion_usd_manual', 1.0)
 
@@ -239,210 +231,154 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
         precio_base_usd_final = 0.0 
         costo_unitario_ars_registrado = 0.0 
 
-        # Determinar valores de la MP
         if precio_manual_unitario > 0.0:
-            # Caso 1: Precio Manual
             if cotizacion_manual > 1.0:
-                # Precio manual es USD
                 precio_base_usd_final = precio_manual_unitario
                 cotizacion_usd_reg_bd = cotizacion_manual
             else:
-                # Precio manual es ARS
                 costo_unitario_ars_registrado = precio_manual_unitario
         
         elif materia_prima_id != -1:
-            # Caso 2: MP de la Base de Datos (compras_materia_prima o precios_materias_primas)
             precio_unitario_reg_base, _, _, cotizacion_usd_reg_bd = \
                 obtener_precio_actual_materia_prima(conn, materia_prima_id)
             
             if cotizacion_usd_reg_bd > 1.0:
-                 # Precio de BD es el USD base 
                 precio_base_usd_final = precio_unitario_reg_base 
             else:
-                # Precio de BD es el ARS final 
                 costo_unitario_ars_registrado = precio_unitario_reg_base
                 
-        # 2. CÁLCULO DEL RECARGO (3% sobre el valor USD base)
         recargo_unitario_ars = 0.0
-        recargo_unitario_usd = 0.0 # Nuevo: Recargo unitario en USD
+        recargo_unitario_usd = 0.0 
         
         if precio_base_usd_final > 0.0:
-            # A) Si la MP tiene un precio USD base, aplicamos el 3% sobre ese precio USD.
             recargo_unitario_usd = precio_base_usd_final * RECARGO_FIJO_USD_PERCENT
-            
-            # Convertimos el recargo USD a ARS usando la cotización actual de simulación
             recargo_unitario_ars = recargo_unitario_usd * cotizacion_dolar_actual
-            
-            # Convertir el USD base (sin recargo) a ARS usando la cotización actual de simulación
             costo_base_mp_ars_real = precio_base_usd_final * cotizacion_dolar_actual
             moneda_origen = f'USD ({cotizacion_usd_reg_bd:.2f})'
         else:
-            # B) Si la MP tiene un precio en ARS fijo, el recargo es 0.
-            # Usar el ARS registrado o manual como costo base.
             costo_base_mp_ars_real = costo_unitario_ars_registrado
             moneda_origen = 'ARS (Fijo)'
-            # El costo base en USD será 0, ya que es ARS fijo
             precio_base_usd_final = 0.0
         
-        # 3. Agregación de costos por componente
-        
-        # Costo total de la MP (Base, sin recargo)
         costo_base_mp_total_ars = cantidad_usada * costo_base_mp_ars_real
-        
-        # Costo total del Recargo (3% USD o 0 si es ARS) para el ingrediente actual
         recargo_mp_total_ars_ingrediente = cantidad_usada * recargo_unitario_ars
         
-        # 4. Cálculo del Costo Unitario Final (para el detalle)
         costo_unitario_final_ars = costo_base_mp_ars_real + recargo_unitario_ars
         costo_ingrediente_total = cantidad_usada * costo_unitario_final_ars
         
-        # ** CÁLCULOS EN USD PARA EL DETALLE (NUEVOS) **
-        costo_unitario_usd_total = precio_base_usd_final + recargo_unitario_usd # Costo unitario final en USD
-        costo_total_usd_ingrediente = cantidad_usada * costo_unitario_usd_total # Costo total en USD
-        # **********************************************
+        costo_unitario_usd_total = precio_base_usd_final + recargo_unitario_usd 
+        costo_total_usd_ingrediente = cantidad_usada * costo_unitario_usd_total 
         
-        # AGREGACIÓN PARA EL RESUMEN
         costo_total_mp_ars += costo_base_mp_total_ars
         costo_total_recargo_mp_ars += recargo_mp_total_ars_ingrediente 
         
-        # 5. Detalle de Costo para la tabla
         detalle_costo.append({
             "Materia Prima": nombre_mp,
             "Unidad": ingrediente["Unidad"],
             "Cantidad (Simulada)": cantidad_usada,
             "Moneda Origen": moneda_origen, 
-            # COLUMNAS PARA ARS (Mantenemos por las dudas, pero se ocultan/renombran en main)
             "Costo Unit. ARS (Base)": costo_base_mp_ars_real, 
             "Recargo 3% ARS (Unit.)": recargo_unitario_ars, 
             "Costo Unit. ARS (Total)": costo_unitario_final_ars,
             "Costo Total ARS": costo_ingrediente_total,
-            # *********************************************************************************
-            # COLUMNAS REQUERIDAS EN USD
-            # *********************************************************************************
-            "Costo Unit. USD (Base)": precio_base_usd_final, # Costo Base Unitario en USD
-            "Recargo 3% USD (Unit.)": recargo_unitario_usd, # Recargo Unitario en USD
-            "Costo Unit. USD (Total)": costo_unitario_usd_total, # Costo Total Unitario en USD
-            "Costo Total USD": costo_total_usd_ingrediente # Costo Total del Ingrediente en USD
+            "Costo Unit. USD (Base)": precio_base_usd_final, 
+            "Recargo 3% USD (Unit.)": recargo_unitario_usd, 
+            "Costo Unit. USD (Total)": costo_unitario_usd_total, 
+            "Costo Total USD": costo_total_usd_ingrediente 
         })
 
-    detalle_df = pd.DataFrame(detalle_costo) # <--- Variable definida
-    # Costo MP Total (incluye base + recargo, excluye Flete General y Overhead)
+    detalle_df = pd.DataFrame(detalle_costo) 
     costo_mp_total = detalle_df["Costo Total ARS"].sum() 
     
-    # Retornamos los costos desagregados
     return costo_mp_total, detalle_df, costo_total_mp_ars, costo_total_recargo_mp_ars
-# ***************************************************************************************************
 
 
 # =================================================================================================
-# FUNCIONES DE GENERACIÓN DE REPORTE (PDF con ReportLab)
+# FUNCIONES DE GENERACIÓN DE REPORTE (PDF con ReportLab) (SIN CAMBIOS)
 # =================================================================================================
 
 def generate_pdf_reportlab(data):
     """
-    Genera el contenido PDF del presupuesto usando la librería ReportLab,
-    enfocado en la vista del cliente.
+    Genera el contenido PDF del presupuesto usando la librería ReportLab.
     """
     
-    # 1. Preparación de datos
     cliente_nombre = data['cliente_nombre']
     fecha_hoy = date.today().strftime('%d/%m/%Y')
     cotizacion_dolar_actual = data['cotizacion_dolar_actual']
     presupuesto_id = data['presupuesto_id']
     
-    # Datos para el resumen final (promedios)
     precio_unitario_ars_litro_AVG = data['precio_unitario_ars_litro'] 
     precio_final_ars = data['precio_final_ars']
     litros_total_acumulado = data['litros_total_acumulado']
     
-    # **IMPORTANTE: Usamos el DF FINAL CALCULADO CON MARGENES INDIVIDUALES**
     df_detalle_final = data['df_detalle_final_presupuesto'].copy()
     
-    # CÁLCULOS EN USD (Final summary only)
     precio_unitario_usd_litro_AVG = precio_unitario_ars_litro_AVG / cotizacion_dolar_actual
     precio_final_usd = precio_final_ars / cotizacion_dolar_actual
     
-    # 2. Configuración de ReportLab
     buffer = io.BytesIO()
     
-    # CORRECCIÓN PARA ORIENTACIÓN HORIZONTAL
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), # <--- CAMBIO CLAVE
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), 
                             leftMargin=0.8*inch, rightMargin=0.8*inch,
                             topMargin=0.8*inch, bottomMargin=0.8*inch)
     
     story = []
     styles = getSampleStyleSheet()
     
-    # Definición de estilos adicionales 
     styles.add(ParagraphStyle(name='PresupuestoTitle', fontSize=18, alignment=1, spaceAfter=12, fontName='Helvetica-Bold'))
     styles.add(ParagraphStyle(name='PresupuestoHeading2', fontSize=14, alignment=0, spaceAfter=8, fontName='Helvetica-Bold'))
     styles.add(ParagraphStyle(name='BodyTextBold', fontSize=12, alignment=0, spaceAfter=6, fontName='Helvetica-Bold'))
-    # Nuevo estilo para el Total USD
     styles.add(ParagraphStyle(name='FinalTotalUSD', fontSize=14, alignment=0, spaceAfter=6, fontName='Helvetica-Bold', textColor=colors.blue))
     
-    # 3. Encabezado del Documento
     story.append(Paragraph(f"PRESUPUESTO CLIENTE N° {presupuesto_id}", styles['PresupuestoTitle']))
     story.append(Spacer(1, 0.2*inch))
     
-    # 4. Información General (Nombre, Fecha, Cotización)
     story.append(Paragraph(f"**Cliente:** {cliente_nombre}", styles['BodyTextBold']))
     story.append(Paragraph(f"**Fecha del Presupuesto:** {fecha_hoy}", styles['BodyTextBold']))
     story.append(Paragraph(f"**Cotización del Dólar (Referencia):** ${cotizacion_dolar_actual:,.2f} ARS/USD", styles['BodyTextBold']))
     story.append(Spacer(1, 0.3*inch))
     
-    # 5. Detalle del Pedido (Tabla)
     story.append(Paragraph("Detalle del Pedido", styles['PresupuestoHeading2']))
     
     table_data = []
-    # Header 
     table_data.append([
         "Producto", 
         "Cantidad (Litros)", 
-        "Margen (%)", # Nuevo
+        "Margen (%)", 
         "Precio x Litro Cliente (ARS/L)", 
         "Precio x Litro Cliente (USD/L)", 
         "Total a Pagar (ARS)",
         "Total a Pagar (USD)" 
     ])
     
-    # Body - CÁLCULO INDIVIDUAL POR ÍTEM
-    # Se ajusta el ancho de las columnas para la nueva orientación horizontal (A4 ~ 11.69 pulgadas)
     total_width = 10.1 * inch 
-    
-    # ColWidths: [1.6in (Producto), 1.0in (Cantidad), 1.0in (Margen), 1.7in (P. Litro ARS), 1.7in (P. Litro USD), 1.55in (Total ARS), 1.55in (Total USD)]
     col_widths = [total_width * 0.16, total_width * 0.10, total_width * 0.10, total_width * 0.18, total_width * 0.18, total_width * 0.14, total_width * 0.14]
 
-
-    # Iteramos sobre el DataFrame de Detalle Final (que ya tiene todos los cálculos)
     for index, row in df_detalle_final.iterrows():
         
-        # Obtenemos los valores finales calculados en el main
         precio_unitario_cliente_ars = row['Precio_Venta_Unitario_ARS']
         precio_unitario_cliente_usd = row['Precio_Venta_Unitario_USD']
         total_a_pagar_ars = row['Precio_Venta_Total_ARS']
-        # ESTA COLUMNA EXISTE GRACIAS A LA CORRECCIÓN EN main()
         total_a_pagar_usd = row['Precio_Venta_Total_USD'] 
 
-        # Añadir a la tabla
         table_data.append([
             row['Receta'], 
             f"{row['Litros']:,.2f} L", 
-            f"{row['Margen_Ganancia']:.2f} %", # Nuevo margen individual
+            f"{row['Margen_Ganancia']:.2f} %", 
             f"${precio_unitario_cliente_ars:,.2f}", 
             f"USD ${precio_unitario_cliente_usd:,.2f}", 
             f"${total_a_pagar_ars:,.2f}",
             f"USD ${total_a_pagar_usd:,.2f}" 
         ])
     
-    # Creación de la tabla y estilos
     table = Table(table_data, colWidths=col_widths)
     table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#DBEAFE')), # Azul claro para el encabezado
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#1E3A8A')), # Texto azul oscuro
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#DBEAFE')), 
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#1E3A8A')), 
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 10), # Aumentado el tamaño de fuente para aprovechar el ancho
+        ('FONTSIZE', (0, 0), (-1, 0), 10), 
         ('FONTSIZE', (0, 1), (-1, -1), 10),
         ('GRID', (0, 0), (-1, -1), 1, colors.grey),
         ('PADDING', (0, 0), (-1, -1), 6),
@@ -451,20 +387,16 @@ def generate_pdf_reportlab(data):
     story.append(table)
     story.append(Spacer(1, 0.5*inch))
     
-    # 6. Totales Finales (Totales Globales)
     story.append(Paragraph(f"**Volumen Total del Pedido:** {litros_total_acumulado:,.2f} Litros", styles['BodyTextBold']))
     
-    # Usamos los promedios del resumen final (AVG)
     story.append(Paragraph(f"**Precio Promedio por Litro a Pagar (Cliente):** ${precio_unitario_ars_litro_AVG:,.2f} ARS/L (USD ${precio_unitario_usd_litro_AVG:,.2f}/L)", styles['BodyTextBold']))
     
     story.append(Spacer(1, 0.1*inch))
     
-    # Total ARS
     story.append(Paragraph(f"**TOTAL FINAL A PAGAR: ${precio_final_ars:,.2f} ARS**", 
                             ParagraphStyle(name='FinalTotal', fontSize=14, alignment=0, spaceAfter=6, 
                                            fontName='Helvetica-Bold', textColor=colors.red)))
     
-    # Total USD (NUEVO)
     story.append(Paragraph(f"**TOTAL FINAL A PAGAR: USD ${precio_final_usd:,.2f}**", 
                             styles['FinalTotalUSD']))
     
@@ -472,7 +404,6 @@ def generate_pdf_reportlab(data):
     story.append(Paragraph("*Este presupuesto tiene validez de X días y está sujeto a cambios en los costos de materias primas y cotización del dólar a la fecha de facturación.", 
                             ParagraphStyle(name='Footer', fontSize=8, alignment=0, textColor=colors.grey)))
 
-    # 7. Construcción del PDF
     doc.build(story)
     
     pdf_content = buffer.getvalue()
@@ -481,7 +412,7 @@ def generate_pdf_reportlab(data):
 
 
 # =================================================================================================
-# INTERFAZ STREAMLIT
+# INTERFAZ STREAMLIT (LÓGICA ACTUALIZADA)
 # =================================================================================================
 
 def main():
@@ -502,16 +433,20 @@ def main():
         st.session_state['gasto_fijo_mensual'] = 0.0 
         st.session_state['flete_base_200l'] = 5000.0 
         
-    # NUEVA VARIABLE DE ESTADO PARA EL PRESUPUESTO
     if 'simulaciones_presupuesto' not in st.session_state:
         st.session_state['simulaciones_presupuesto'] = []
     
-    # Variable para guardar la data del presupuesto generado
     if 'presupuesto_data_for_print' not in st.session_state:
         st.session_state['presupuesto_data_for_print'] = {}
         
+    # NUEVOS ESTADOS PARA LA EDICIÓN DE GASTOS
+    if 'gastos_temporales_simulacion' not in st.session_state:
+        st.session_state.gastos_temporales_simulacion = []
+    # Usaremos esto para almacenar el último total de gastos fijos calculado por el editor/temporales
+    if 'gasto_fijo_mensual_total' not in st.session_state:
+        st.session_state.gasto_fijo_mensual_total = 0.0
+        
     conn = get_connection()
-    # Asegurar que las tablas existan
     create_tables_if_not_exists(conn)
     
     # --- Side Bar Configuration (Gasto Fijo, Flete, Overhead, Dólar) ---
@@ -519,10 +454,10 @@ def main():
     # --- FIJAR MES A SEPTIEMBRE (9) ---
     MES_SIMULACION = 9 
     
-    st.sidebar.subheader(f"Costos Fijos Automáticos (Septiembre)")
+    st.sidebar.subheader(f"Costos Fijos Operativos (Simulación de {calendar.month_name[MES_SIMULACION].capitalize()})")
     
     # -----------------------------------------------------------
-    # 1. CÁLCULO AUTOMÁTICO DE GASTOS FIJOS OPERATIVOS (Septiembre)
+    # 1. ENTRADA DEL AÑO DE SIMULACIÓN
     # -----------------------------------------------------------
     anio_simulacion = st.sidebar.number_input(
         "Año de Gasto Fijo a Simular:", 
@@ -532,15 +467,139 @@ def main():
         key="anio_simulacion_value"
     )
     
-    gasto_fijo_mensual_auto, error_gasto = get_detalle_gastos_mensual(MES_SIMULACION, anio_simulacion)
+    # El valor 'gasto_fijo_mensual_auto' ahora se toma del Session State (actualizado por el editor)
+    gasto_fijo_mensual_auto = st.session_state.gasto_fijo_mensual_total
     st.session_state['gasto_fijo_mensual'] = gasto_fijo_mensual_auto
-    
+
     st.sidebar.markdown(f"**Gasto Operativo Total ({calendar.month_name[MES_SIMULACION].capitalize()} {anio_simulacion}):**")
-    st.sidebar.success(f"${gasto_fijo_mensual_auto:,.2f} ARS (De Gastos de BD)")
-    if error_gasto: st.sidebar.warning(f"⚠️ {error_gasto}")
-    
+    st.sidebar.success(f"${gasto_fijo_mensual_auto:,.2f} ARS (Calculado con Cambios)")
+
     # -----------------------------------------------------------
-    # 2. COSTO DE FLETE BASE (200L) - INGRESO MANUAL
+    # 2. SECCIÓN PARA CARGAR GASTO TEMPORAL (NUEVA IMPLEMENTACIÓN)
+    # -----------------------------------------------------------
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("➕ Cargar Gasto Temporal (Simulación)")
+    
+    # Obtener categorías de la DB para el selectbox
+    df_categorias = fetch_df("SELECT nombre FROM categorias_imputacion ORDER BY nombre")
+    categorias = df_categorias['nombre'].tolist() if not df_categorias.empty else ["Sin Categorías"]
+    
+    with st.sidebar.form("form_gasto_temporal_sidebar"):
+        gasto_categoria = st.selectbox("Categoría:", categorias, key="temp_gasto_categoria")
+        gasto_beneficiario = st.text_input("Beneficiario/Descripción:", key="temp_gasto_beneficiario")
+        gasto_monto = st.number_input("Monto (ARS):", min_value=0.0, value=1000.0, step=100.0, format="%.2f", key="temp_gasto_monto")
+        
+        submitted_gasto = st.form_submit_button("Agregar Gasto Temporal")
+        
+        if submitted_gasto:
+            if gasto_monto > 0:
+                # Se agrega un gasto temporal con ID para poder limpiar o identificar
+                st.session_state.gastos_temporales_simulacion.append({
+                    'Fecha': date.today().isoformat(),
+                    'Categoria': gasto_categoria,
+                    'Beneficiario': gasto_beneficiario if gasto_beneficiario else "Gasto Temporal",
+                    'Monto_ARS': gasto_monto,
+                    # ID único temporal, necesario para dataframes
+                    'ID_Gasto_Unico': f"TEMP_{len(st.session_state.gastos_temporales_simulacion) + 1}", 
+                })
+                st.success("Gasto temporal agregado. El total se actualizará al abrir/cerrar el detalle.")
+                st.rerun()
+
+    # Botón para limpiar los gastos temporales
+    if st.sidebar.button("Limpiar Gastos Temporales"):
+        st.session_state.gastos_temporales_simulacion = []
+        st.session_state.gasto_fijo_mensual_total = 0.0
+        st.rerun()
+        
+    st.sidebar.markdown("---")
+
+    # -----------------------------------------------------------
+    # 3. DETALLE DE GASTOS Y EDITOR (IMPLEMENTACIÓN DEL EDITOR)
+    # -----------------------------------------------------------
+    MES_GASTOS = MES_SIMULACION
+    ANIO_GASTOS = anio_simulacion 
+    
+    # NUEVA FUNCIONALIDAD: DETALLE DE GASTOS con expander y EDITOR
+    with st.sidebar.expander(f"Ver/Editar Detalle de Gasto Operativo ({calendar.month_name[MES_GASTOS].capitalize()} {ANIO_GASTOS})"):
+        st.markdown(f"**Detalle de Gastos Operativos ({MES_GASTOS:02d}/{ANIO_GASTOS}):**")
+        st.info("⚠️ Doble clic en el monto (ARS) para editarlo en la simulación.")
+        
+        # 1. Obtener el detalle de gastos de la DB
+        df_detalle_db = get_detalle_gastos_operativos_mensual(MES_GASTOS, ANIO_GASTOS)
+        
+        # Agregar una columna de ID único para DB
+        if not df_detalle_db.empty:
+            df_detalle_db['ID_Gasto_Unico'] = df_detalle_db.index.map(lambda x: f"DB_{x}")
+            
+        # 2. Convertir gastos temporales a DataFrame
+        df_gastos_temporales = pd.DataFrame(st.session_state.gastos_temporales_simulacion)
+        
+        # 3. Combinar datos
+        if not df_detalle_db.empty and not df_gastos_temporales.empty:
+            df_detalle_gastos = pd.concat([df_detalle_db, df_gastos_temporales], ignore_index=True)
+        elif not df_detalle_db.empty:
+            df_detalle_gastos = df_detalle_db
+        elif not df_gastos_temporales.empty:
+            df_detalle_gastos = df_gastos_temporales
+        else:
+            df_detalle_gastos = pd.DataFrame()
+            
+        if not df_detalle_gastos.empty:
+            
+            # Configurar el editor de datos (data_editor)
+            column_config_gastos = {
+                "Fecha": st.column_config.TextColumn(disabled=True),
+                "Categoria": st.column_config.TextColumn(disabled=True),
+                "Beneficiario": st.column_config.TextColumn(disabled=True),
+                "ID_Gasto_Unico": st.column_config.TextColumn(disabled=True, help="Identificador único para BD o Temporal."),
+                "Monto_ARS": st.column_config.NumberColumn(
+                    "Monto (ARS)",
+                    min_value=0.0,
+                    format="$ %.2f",
+                    # CLAVE: Permitir edición de esta columna
+                    help="Haga doble clic para editar el monto en la simulación." 
+                )
+            }
+            
+            # 4. Mostrar el editor y capturar los cambios
+            edited_df_gastos = st.data_editor(
+                df_detalle_gastos,
+                column_config=column_config_gastos,
+                use_container_width=True,
+                height=300,
+                hide_index=True,
+                # Solo mostramos columnas relevantes para el usuario
+                column_order=["Fecha", "Categoria", "Beneficiario", "Monto_ARS"], 
+                key="editor_gastos_operativos"
+            )
+
+            # 5. Recalcular el total y actualizar el session state
+            total_db_simulacion = edited_df_gastos['Monto_ARS'].sum()
+            # CLAVE: Actualizar el valor que usa el Overhead
+            st.session_state.gasto_fijo_mensual_total = total_db_simulacion 
+            
+            # Recálculo de subtotales por categoría (usando el DF editado)
+            total_por_categoria = edited_df_gastos.groupby('Categoria')['Monto_ARS'].sum().reset_index()
+            total_por_categoria['Monto_ARS'] = total_por_categoria['Monto_ARS'].apply(lambda x: f"${x:,.2f}")
+            
+            st.markdown("---")
+            st.markdown("**Resumen por Categoría (Editado):**")
+            st.dataframe(
+                total_por_categoria.rename(columns={'Monto_ARS': 'Subtotal (ARS)'}),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.markdown(f"**Total General (Simulación):** **${total_db_simulacion:,.2f} ARS**")
+            
+            # CLAVE: Forzar rerun si el editor ha sido modificado para que el Overhead se actualice.
+            # NOTA: st.data_editor fuerza un rerun por defecto si hay cambios.
+
+        else:
+            st.warning(f"No se encontraron gastos para {calendar.month_name[MES_GASTOS].capitalize()} de {ANIO_GASTOS} en la base de datos ni se han cargado gastos temporales.")
+
+    # -----------------------------------------------------------
+    # 4. COSTO DE FLETE BASE (200L) - INGRESO MANUAL
     # -----------------------------------------------------------
     st.sidebar.markdown("---")
     st.sidebar.subheader("Costo de Flete General (Directo)")
@@ -560,17 +619,16 @@ def main():
     st.sidebar.markdown("---")
     
     # -----------------------------------------------------------
-    # 3. VOLUMEN MENSUAL Y CÁLCULO DE OVERHEAD POR LITRO (AUTOMÁTICO/MANUAL)
+    # 5. VOLUMEN MENSUAL Y CÁLCULO DE OVERHEAD POR LITRO 
     # -----------------------------------------------------------
     st.sidebar.subheader("Asignación de Costos por Overhead (Gasto Indirecto Tanda)")
     
-    # Cálculo automático del volumen mensual basado en las 8 recetas diarias
     volumen_mensual_litros = VOLUMEN_MENSUAL_AUTOMATICO
     
     st.sidebar.markdown(f"**Volumen Mensual de Producción (8 Recetas/Día):**")
     st.sidebar.info(f"{volumen_mensual_litros:,.0f} Litros/Mes")
 
-    # Calcular Costo Indirecto por Litro (Automático)
+    # Calcular Costo Indirecto por Litro (Automático) - USA EL VALOR EDITADO/TEMPORAL
     if volumen_mensual_litros > 0:
         costo_indirecto_por_litro_auto = gasto_fijo_mensual_auto / volumen_mensual_litros
     else:
@@ -578,28 +636,27 @@ def main():
         
     st.sidebar.metric("Costo Indirecto Operativo por Litro (Auto)", f"${costo_indirecto_por_litro_auto:,.2f} ARS/L")
 
-    # --- NUEVO INPUT MANUAL PARA OVERHEAD ---
     costo_indirecto_por_litro_manual = st.sidebar.number_input(
         "Costo Indirecto por Litro (Manual ARS/L):",
         min_value=0.0,
-        value=0.0, # Inicialmente en 0.0 para usar el automático por defecto
+        value=0.0, 
         step=0.1,
         format="%.2f",
         key="overhead_manual_input",
         help="Ingrese un valor manual para anular el cálculo automático de Overhead por Litro. (0.0 usa el valor Auto)"
     )
 
-    # Lógica para determinar qué valor de Overhead usar
     if costo_indirecto_por_litro_manual > 0.0:
         costo_indirecto_por_litro = costo_indirecto_por_litro_manual
         st.sidebar.info(f"Usando Overhead Manual: ${costo_indirecto_por_litro:,.2f} ARS/L")
     else:
         costo_indirecto_por_litro = costo_indirecto_por_litro_auto
-    # ----------------------------------------
 
     st.sidebar.markdown("---")
     
-    # --- ENTRADA DEL DÓLAR DEL DÍA ---
+    # -----------------------------------------------------------
+    # 6. ENTRADA DEL DÓLAR DEL DÍA
+    # -----------------------------------------------------------
     st.sidebar.subheader("Cotización Dólar del Día")
     cotizacion_dolar_actual = st.sidebar.number_input(
         "Precio de Venta del Dólar (ARS)",
@@ -694,12 +751,9 @@ def main():
 
     st.subheader("Simulación de Costos (Vista Excel - LIVE)")
 
-    # ----------------------------------------------------------------------
     # 1. CÁLCULO PREVIO DEL PRECIO UNITARIO BASE (USD) PARA LA VISUALIZACIÓN
-    # ----------------------------------------------------------------------
     ingredientes_df['Precio Unitario (USD) BASE'] = 0.0
     
-    # Recorrer el DataFrame para determinar el precio base USD (BD o Manual)
     for index, row in ingredientes_df.iterrows():
         
         precio_base_usd_final = 0.0
@@ -708,21 +762,17 @@ def main():
         materia_prima_id = row["materia_prima_id"]
 
         if precio_manual_unitario > 0.0 and cotizacion_manual > 1.0:
-            # Caso Manual en USD
             precio_base_usd_final = precio_manual_unitario
         
         elif materia_prima_id != -1 and precio_manual_unitario == 0.0:
-            # Caso de la Base de Datos (Si no tiene precio manual forzado)
             precio_unitario_reg_base, _, _, cotizacion_usd_reg_bd = \
                 obtener_precio_actual_materia_prima(conn, materia_prima_id)
             
             if cotizacion_usd_reg_bd > 1.0:
-                # Si es un precio dolarizado en BD
                 precio_base_usd_final = precio_unitario_reg_base
                 
         ingredientes_df.loc[index, 'Precio Unitario (USD) BASE'] = precio_base_usd_final
-    # ----------------------------------------------------------------------
-
+    
     # 2. Configurar el editor de datos (vista Excel)
     column_config = {
         "ID_Receta": st.column_config.TextColumn(disabled=True),
@@ -734,65 +784,55 @@ def main():
         "Precio Unitario (USD) BASE": st.column_config.NumberColumn(
             "Precio Unitario (USD) BASE", 
             format="%.4f",
-            disabled=True, # Esta columna es solo informativa, no editable
+            disabled=True, 
             help="Precio Unitario en USD de la MP (tomado de BD o Manual). Este valor se re-cotiza con el dólar actual de la simulación. NO es editable."
         ),
         "Quitar": st.column_config.CheckboxColumn(help="Marque para excluir de la simulación.",),
         "Temporal": st.column_config.CheckboxColumn(disabled=True),
-        # Las columnas de precio manual y cotización manual deben estar presentes para la lógica,
-        # pero ocultamos la cotización y la hacemos no editable en esta vista.
         "precio_unitario_manual": st.column_config.NumberColumn("Precio Manual Unit. (ARS/USD)", format="%.4f",
             help="Ingrese un precio unitario manual. Si es USD, use una Cotización USD > 1 en el formulario 'Agregar MP'."
         ),
         "cotizacion_usd_manual": st.column_config.NumberColumn("Cot. USD (Manual)", format="%.2f", min_value=1.0,),
     }
     
-    # Columnas a mostrar: Ocultamos 'cotizacion_usd_manual'
     cols_display_final = ["Materia Prima", "Unidad", "Cantidad Base (200L)", "cantidad_simulada", 
                           "Precio Unitario (USD) BASE", "precio_unitario_manual", "Quitar"]
 
 
     edited_df = st.data_editor(
-        ingredientes_df, # Usamos el DF completo que ahora tiene la columna 'Precio Unitario (USD) BASE'
+        ingredientes_df, 
         column_config=column_config,
-        column_order=cols_display_final, # SOLO MOSTRAMOS ESTAS
+        column_order=cols_display_final, 
         num_rows="fixed",
         use_container_width=True,
         key="data_editor_ingredientes"
     )
 
     # 3. Mapear de vuelta el DataFrame editado al original para el cálculo
-    # Mapeamos solo las columnas editables: Cantidad Base, Quitar, Precio Manual
     ingredientes_df['Cantidad Base (200L)'] = edited_df['Cantidad Base (200L)']
     ingredientes_df['Quitar'] = edited_df['Quitar']
     ingredientes_df['precio_unitario_manual'] = edited_df['precio_unitario_manual']
-    # Mantenemos cotizacion_usd_manual del DF original, ya que fue oculta y no se puede editar en edited_df.
     ingredientes_df['cantidad_simulada'] = ingredientes_df['Cantidad Base (200L)'] * factor_escala
 
     # --- LÓGICA DE CÁLCULO EN VIVO ---
     ingredientes_a_calcular = ingredientes_df[~ingredientes_df['Quitar']].copy()
     
-    # Costo SÓLO de Materia Prima (Incluye Recargo 3% USD)
     costo_mp_total, detalle_costo_df, costo_mp_base_ars, costo_recargo_mp_ars = calcular_costo_total(
         ingredientes_a_calcular, 
         cotizacion_dolar_actual, 
         conn
     )
     
-    # Cálculo de la MP base en USD (sólo para mostrar en las métricas)
     costo_mp_base_usd = costo_mp_base_ars / cotizacion_dolar_actual
     
     # --------------------------------------------------------------------------
-    # CÁLCULOS DE COSTOS FIJOS (LÓGICA AUTOMÁTICA/MANUAL)
+    # CÁLCULOS DE COSTOS FIJOS (USA EL VALOR EDITADO/TEMPORAL: gasto_fijo_mensual_auto)
     # --------------------------------------------------------------------------
     
-    # CÁLCULO DEL GASTO INDIRECTO (OVERHEAD) - USA costo_indirecto_por_litro CALCULADO/SOBREESCRITO EN EL SIDEBAR
     gasto_indirecto_tanda = costo_indirecto_por_litro * cantidad_litros
     
-    # CÁLCULO DEL FLETE GENERAL (COMO COSTO DIRECTO) - USANDO VALOR MANUAL
     costo_flete_total_ars = st.session_state['flete_base_200l'] * factor_escala
     
-    # CÁLCULO DEL COSTO TOTAL FINAL
     # Costo Total Final = Costo MP Base ARS + Recargo 3% USD (ARS) + Flete General + Indirecto Operativo
     costo_total_final = costo_mp_base_ars + costo_recargo_mp_ars + costo_flete_total_ars + gasto_indirecto_tanda
     
@@ -810,7 +850,6 @@ def main():
     
     st.subheader(f"✅ Resultado del Costo en Vivo para {cantidad_litros:.2f} Litros (Dólar: ${st.session_state['dolar']:.2f})")
     
-    # ... (Muestra de resultados y métricas)
     col_res1, col_res2, col_res3 = st.columns(3) 
     
     # --------------------------------------------------------------------------------------
@@ -822,7 +861,7 @@ def main():
         help=f"Equivalente a USD ${costo_mp_base_usd:,.2f}"
     )
     col_res1.metric(
-        "Recargo 3% USD MP (Total)", # Nombre actualizado
+        "Recargo 3% USD MP (Total)", 
         f"${costo_recargo_mp_ars:,.2f} ARS"
     )
     
@@ -842,7 +881,6 @@ def main():
     st.header("COSTO TOTAL FINAL DE LA TANDA (ARS y USD)")
     col_final_ars, col_final_usd = st.columns(2)
     
-    # Columna ARS
     col_final_ars.metric(
         "Costo Total de la Tanda (ARS)",
         f"${costo_total_final:,.2f} ARS"
@@ -852,7 +890,6 @@ def main():
         f"${costo_por_litro_ars:,.2f} ARS/L"
     )
     
-    # Columna USD
     col_final_usd.metric(
         "Costo Total de la Tanda (USD)",
         f"USD ${costo_total_final_usd:,.2f}"
@@ -863,12 +900,9 @@ def main():
     )
     # ----------------------------------
     
-    # ***************************************************************************************************
     # ** Detalle de costo por ingrediente (USD) **
-    # ***************************************************************************************************
     with st.expander("Ver Detalle de Costo por Ingrediente 🔎"):
         
-        # Definición de la configuración de columnas (solo para formato)
         col_config_detalle = {
             "Costo Unit. USD (Base)": st.column_config.NumberColumn(
                 "Costo Unit. USD (Base)", format="$ %.4f", help="Precio unitario en USD de la Materia Prima (tomado de BD o manual)."
@@ -884,7 +918,6 @@ def main():
             ),
         }
         
-        # Columnas a mostrar: Las nuevas columnas en USD.
         cols_ordenadas = [
             "Materia Prima", 
             "Unidad", 
@@ -901,7 +934,6 @@ def main():
             use_container_width=True, 
             column_config={k: v for k, v in col_config_detalle.items() if k in cols_ordenadas}
         )
-    # ***************************************************************************************************
     
     # --------------------------------------------------------------------------------------
     # SECCIÓN: GESTIÓN DE SIMULACIONES PARA PRESUPUESTO
@@ -911,7 +943,6 @@ def main():
     
     col_cant_add, col_margen_add, col_button_add = st.columns([0.3, 0.3, 0.4])
     
-    # CAMBIO 1: Entrada para la cantidad de tandas/simulaciones
     cantidad_a_agregar = col_cant_add.number_input(
         "Cantidad de Tandas a Agregar:",
         min_value=1,
@@ -920,7 +951,6 @@ def main():
         key="cantidad_a_agregar_input"
     )
     
-    # CAMBIO 2: Margen de Ganancia inicial para el producto
     margen_ganancia_inicial = col_margen_add.number_input(
         "Margen Inicial (%):", 
         min_value=0.0, 
@@ -932,8 +962,6 @@ def main():
 
     if col_button_add.button(f"➕ Agregar '{receta_seleccionada_nombre}' (x{cantidad_a_agregar}) al Presupuesto", use_container_width=True):
         
-        # 1. Aseguramos que los cambios de Cantidad/Precio Manual de esta simulación 
-        # queden reflejados en el estado temporal antes de agregar al presupuesto.
         st.session_state.ingredientes_temporales = []
         ingredientes_temporales_a_guardar = ingredientes_a_calcular.copy()
         
@@ -944,26 +972,19 @@ def main():
                     'precio_unitario': row['precio_unitario_manual'], 'cotizacion_usd': row['cotizacion_usd_manual'], 'materia_prima_id': row['materia_prima_id'],
                 })
         
-        # 2. Preparamos la data escalada
         simulacion_data = {
             'nombre_receta': receta_seleccionada_nombre,
-            # Multiplicamos los totales por la cantidad_a_agregar
             'litros': cantidad_litros * cantidad_a_agregar,
             'costo_total_ars': costo_total_final * cantidad_a_agregar,
-            # Los costos unitarios se mantienen igual
             'costo_por_litro_ars': costo_por_litro_ars, 
-            # Multiplicamos los costos indirectos/fletes por la cantidad_a_agregar
             'gasto_indirecto_tanda': gasto_indirecto_tanda * cantidad_a_agregar,
             'costo_flete_total_ars': costo_flete_total_ars * cantidad_a_agregar,
-            # Nuevo: Margen de Ganancia para este producto/simulación
             'margen_ganancia': margen_ganancia_inicial, 
             'cantidad_tandas': cantidad_a_agregar,
             'detalle_mp_json_unitario': detalle_costo_df.to_json(orient='records'),
         }
         
-        # Agregamos la simulación
         st.session_state['simulaciones_presupuesto'].append(simulacion_data)
-        # Limpiar la data de impresión para forzar la re-generación
         st.session_state['presupuesto_data_for_print'] = {}
         st.success(f"Simulación de {receta_seleccionada_nombre} (x{cantidad_a_agregar}) agregada con Margen Inicial del {margen_ganancia_inicial:.2f}%. Total de items: {len(st.session_state['simulaciones_presupuesto'])}")
         st.rerun()
@@ -975,7 +996,6 @@ def main():
     # --------------------------------------------------------------------------------------
     st.header("📄 Generar Presupuesto Final")
 
-    # Muestra de resumen de simulaciones cargadas
     if st.session_state['simulaciones_presupuesto']:
         st.subheader("Simulaciones Cargadas: (Edite el Margen de Ganancia Individual)")
         
@@ -991,24 +1011,18 @@ def main():
                 'Litros': sim['litros'],
                 'Costo Total ARS': sim['costo_total_ars'],
                 'costo_por_litro_ars': sim['costo_por_litro_ars'],
-                # CORRECCIÓN CLAVE: Usamos un nombre de columna claro para el usuario
                 'Margen de Ganancia (%)': sim['margen_ganancia'] 
             })
             
-        # Creamos el DataFrame y lo ponemos en el editor de datos para que el usuario pueda cambiar el margen
         df_resumen = pd.DataFrame(datos_resumen)
-        
-        # Guardamos el DF en el state para poder acceder al margen editado
         st.session_state['df_resumen_editable'] = df_resumen
 
-        # Configuración para el editor de datos
         col_config_resumen = {
             'ID': st.column_config.NumberColumn(disabled=True),
             'Receta': st.column_config.TextColumn(disabled=True),
             'Tandas': st.column_config.NumberColumn(format="%.0f", disabled=True),
             'Litros': st.column_config.NumberColumn(format="%.2f", disabled=True),
             'Costo Total ARS': st.column_config.NumberColumn(format="$%f", disabled=True),
-            # CORRECCIÓN CLAVE: El nombre de la columna en el editor debe coincidir
             'Margen de Ganancia (%)': st.column_config.NumberColumn( 
                 "Margen de Ganancia (%)", 
                 min_value=0.0, 
@@ -1017,7 +1031,6 @@ def main():
             ),
         }
         
-        # CORRECCIÓN CLAVE: Usamos el nuevo nombre de columna para mostrar y editar
         edited_df_resumen = st.data_editor(
             df_resumen[['ID', 'Receta', 'Tandas', 'Litros', 'Costo Total ARS', 'Margen de Ganancia (%)']],
             hide_index=True, 
@@ -1026,14 +1039,11 @@ def main():
             key="df_resumen_editor"
         )
         
-        # Sincronizar el estado de la sesión con el DF editado
         st.session_state['df_resumen_editable'] = edited_df_resumen.copy()
         
-        # Recalcular Acumulados
         costo_total_acumulado = edited_df_resumen['Costo Total ARS'].sum()
         litros_total_acumulado = edited_df_resumen['Litros'].sum()
         
-        # Mostrar totales sin el precio final
         st.markdown(f"**Costo Total Acumulado de Producción (ARS):** ${costo_total_acumulado:,.2f}")
         st.markdown(f"**Volumen Total (Litros):** {litros_total_acumulado:,.2f} L")
         st.markdown("---")
@@ -1042,10 +1052,7 @@ def main():
         with st.form("form_presupuesto_final"):
             st.subheader("Datos del Presupuesto (Guardado)")
             
-            # 1. Ingreso del Cliente
             cliente_nombre = st.text_input("Nombre del Cliente:", key="cliente_nombre_input")
-            
-            # EL CONTROL 'Margen Promedio a Guardar en BD (%)' FUE ELIMINADO
             
             submitted = st.form_submit_button("Generar y Guardar Presupuesto")
             
@@ -1053,53 +1060,37 @@ def main():
                 if not cliente_nombre:
                     st.error("Debe ingresar el nombre del cliente.")
                 else:
-                    # -----------------------------------------------------------------
-                    # CÁLCULO FINAL DETALLADO (USANDO MÁRGENES INDIVIDUALES)
-                    # -----------------------------------------------------------------
                     
                     df_final = st.session_state['df_resumen_editable'].copy()
                     
-                    # CORRECCIÓN CLAVE: Renombramos la columna editada para que la lógica de cálculo la reconozca
                     df_final.rename(columns={'Margen de Ganancia (%)': 'Margen_Ganancia'}, inplace=True)
                     
-                    # 1. Aplicar la ganancia por producto
                     df_final['Factor_Ganancia'] = 1 + (df_final['Margen_Ganancia'] / 100.0)
-                    
-                    # 2. Calcular Venta Total por producto
                     df_final['Precio_Venta_Total_ARS'] = df_final['Costo Total ARS'] * df_final['Factor_Ganancia']
-                    
-                    # 🚀 CORRECCIÓN CLAVE: Agregar el cálculo del Precio de Venta Total en USD
                     df_final['Precio_Venta_Total_USD'] = df_final['Precio_Venta_Total_ARS'] / cotizacion_dolar_actual 
                     
-                    # 3. Calcular la Ganancia Total y Precio Final Acumulado
                     ganancia_total_ars = df_final['Precio_Venta_Total_ARS'].sum() - costo_total_acumulado
                     precio_final_ars_total = df_final['Precio_Venta_Total_ARS'].sum()
                     
-                    # 4. Calcular Unitarios (para la vista y el PDF)
                     df_final['Precio_Venta_Unitario_ARS'] = df_final['Precio_Venta_Total_ARS'] / df_final['Litros']
                     df_final['Precio_Venta_Unitario_USD'] = df_final['Precio_Venta_Unitario_ARS'] / cotizacion_dolar_actual
-                    df_final['Costo_Unitario_ARS'] = df_final['Costo Total ARS'] / df_final['Litros'] # Costo unitario real
+                    df_final['Costo_Unitario_ARS'] = df_final['Costo Total ARS'] / df_final['Litros'] 
 
-                    # -----------------------------------------------------------------
                     
-                    # CÁLCULOS GLOBALES (Para el Resumen y Guardado en BD)
                     precio_unitario_ars_litro_AVG = precio_final_ars_total / litros_total_acumulado
                     
                     # 1. Guardar en la Base de Datos
                     try:
                         cliente_id = get_or_create_client(conn, cliente_nombre)
                         
-                        # Almacenamos el DataFrame final (incluye márgenes y precios) como JSON para la BD
                         detalle_simulaciones_json = df_final.to_json(orient='records')
                         
-                        # AJUSTE: Usamos un valor fijo para el margen global, ya que el campo fue eliminado
                         porcentaje_ganancia_global_bd = 30.0 
                         
-                        # Usamos el margen global de referencia para el campo 'porcentaje_ganancia'
                         presupuesto_id = save_presupuesto(
                             conn, 
                             cliente_id, 
-                            porcentaje_ganancia_global_bd, # Usamos el valor fijo
+                            porcentaje_ganancia_global_bd, 
                             litros_total_acumulado, 
                             costo_total_acumulado, 
                             precio_final_ars_total,
@@ -1107,13 +1098,11 @@ def main():
                         )
                         st.success(f"✅ Presupuesto Guardado (ID: {presupuesto_id}) para el Cliente: {cliente_nombre}.")
                         
-                        # 2. Presentación Final (NUEVA VISTA DETALLADA)
+                        # 2. Presentación Final
                         st.subheader(f"📊 Presentación Final para {cliente_nombre}")
                         
-                        # Mostrar la tabla de detalle por producto
                         st.markdown("**Detalle de Venta por Producto**")
                         
-                        # NOTA: df_final['Margen_Ganancia'] es la columna renombrada de 'Margen de Ganancia (%)'
                         df_presentacion = df_final[['Receta', 'Litros', 'Costo Total ARS', 'Margen_Ganancia', 
                                                     'Precio_Venta_Total_ARS', 'Precio_Venta_Unitario_ARS']].copy()
                         df_presentacion.rename(columns={
@@ -1123,10 +1112,8 @@ def main():
                             'Precio_Venta_Unitario_ARS': 'Venta_Unitario_ARS/L'
                         }, inplace=True)
                         
-                        # Calculamos la Ganancia por Producto para la vista
                         df_presentacion['Ganancia_ARS'] = df_presentacion['Venta_Total_ARS'] - df_presentacion['Costo_Total_ARS']
                         
-                        # Reordenamos columnas para la vista
                         df_presentacion = df_presentacion[['Receta', 'Litros', 'Costo_Total_ARS', 'Margen_Aplicado (%)', 'Ganancia_ARS', 'Venta_Total_ARS', 'Venta_Unitario_ARS/L']]
 
                         st.dataframe(
@@ -1157,16 +1144,14 @@ def main():
                         col_litro_ars.metric("Precio por Litro (ARS/L)", f"${precio_unitario_ars_litro_AVG:,.2f} ARS/L")
                         col_litro_usd.metric("Precio por Litro (USD/L)", f"USD ${precio_unitario_ars_litro_AVG / cotizacion_dolar_actual:,.2f} USD/L")
                         
-                        # Guardar la data en el session state para la función de impresión
                         st.session_state['presupuesto_data_for_print'] = {
                             'cliente_nombre': cliente_nombre,
                             'costo_total_acumulado': costo_total_acumulado,
-                            'ganancia_ars': ganancia_total_ars, # Ganancia total
-                            'precio_final_ars': precio_final_ars_total, # Precio final total
+                            'ganancia_ars': ganancia_total_ars, 
+                            'precio_final_ars': precio_final_ars_total, 
                             'litros_total_acumulado': litros_total_acumulado,
-                            'precio_unitario_ars_litro': precio_unitario_ars_litro_AVG, # Promedio
-                            'porcentaje_ganancia': porcentaje_ganancia_global_bd, # Margen de referencia (valor fijo)
-                            # NUEVO: Pasamos el DF_FINAL con todos los detalles de venta
+                            'precio_unitario_ars_litro': precio_unitario_ars_litro_AVG, 
+                            'porcentaje_ganancia': porcentaje_ganancia_global_bd, 
                             'df_detalle_final_presupuesto': df_final, 
                             'cotizacion_dolar_actual': cotizacion_dolar_actual,
                             'presupuesto_id': presupuesto_id
@@ -1183,16 +1168,14 @@ def main():
             
             data = st.session_state['presupuesto_data_for_print']
             
-            # Generar el contenido PDF (ReportLab)
             pdf_bytes = generate_pdf_reportlab(data)
             download_file_name = f"Presupuesto_N{data['presupuesto_id']}_{data['cliente_nombre'].replace(' ', '_')}.pdf"
             
-            # Usar st.download_button para la descarga de PDF
             col_print.download_button(
                 label="⬇️ Descargar Presupuesto (PDF - ReportLab)",
                 data=pdf_bytes,
                 file_name=download_file_name,
-                mime="application/pdf", # MIME type para PDF
+                mime="application/pdf", 
                 use_container_width=True
             )
             
@@ -1211,14 +1194,12 @@ def main():
     st.markdown("---")
     st.header("⚙️ Guardar Estado de Simulación Temporal (Opcional)")
     
-    # ... (Resto del código de "Aplicar Cambios (Cantidades y Precios) al Estado Temporal - Mantener Receta")
     if st.button("Aplicar Cambios (Cantidades y Precios) al Estado Temporal - Mantener Receta"):
         
         st.info("Actualizando estado de la simulación...")
         st.session_state.ingredientes_temporales = []
         ingredientes_temporales_a_guardar = ingredientes_a_calcular.copy()
         
-        # Solo guardamos los temporales (nuevos) o los que tienen precio manual
         for index, row in ingredientes_temporales_a_guardar.iterrows():
             if row['Temporal'] or row['precio_unitario_manual'] > 0.0:
                  st.session_state.ingredientes_temporales.append({
