@@ -294,7 +294,7 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
 
 
 # =================================================================================================
-# FUNCIONES DE GENERACIÓN DE REPORTE (PDF con ReportLab) (SIN CAMBIOS)
+# FUNCIONES DE GENERACIÓN DE REPORTE (PDF con ReportLab) (MODIFICADO)
 # =================================================================================================
 
 def generate_pdf_reportlab(data):
@@ -330,10 +330,12 @@ def generate_pdf_reportlab(data):
     styles.add(ParagraphStyle(name='BodyTextBold', fontSize=12, alignment=0, spaceAfter=6, fontName='Helvetica-Bold'))
     styles.add(ParagraphStyle(name='FinalTotalUSD', fontSize=14, alignment=0, spaceAfter=6, fontName='Helvetica-Bold', textColor=colors.blue))
     
-    story.append(Paragraph(f"PRESUPUESTO CLIENTE N° {presupuesto_id}", styles['PresupuestoTitle']))
+    # MODIFICACIÓN: Nuevo Título principal con nombre del cliente
+    story.append(Paragraph(f"CLIENTE: {cliente_nombre}", styles['PresupuestoTitle']))
     story.append(Spacer(1, 0.2*inch))
     
-    story.append(Paragraph(f"**Cliente:** {cliente_nombre}", styles['BodyTextBold']))
+    # MODIFICACIÓN: Número de Presupuesto encima de la fecha
+    story.append(Paragraph(f"**Número de Presupuesto:** {presupuesto_id}", styles['BodyTextBold']))
     story.append(Paragraph(f"**Fecha del Presupuesto:** {fecha_hoy}", styles['BodyTextBold']))
     story.append(Paragraph(f"**Cotización del Dólar (Referencia):** ${cotizacion_dolar_actual:,.2f} ARS/USD", styles['BodyTextBold']))
     story.append(Spacer(1, 0.3*inch))
@@ -343,16 +345,16 @@ def generate_pdf_reportlab(data):
     table_data = []
     table_data.append([
         "Producto", 
-        "Cantidad (Litros)", 
-        "Margen (%)", 
-        "Precio x Litro Cliente (ARS/L)", 
-        "Precio x Litro Cliente (USD/L)", 
+        "Cantidad", 
+        "Precio x Litro(ARS/L)", 
+        "Precio x Litro(USD/L)", 
         "Total a Pagar (ARS)",
         "Total a Pagar (USD)" 
     ])
     
     total_width = 10.1 * inch 
-    col_widths = [total_width * 0.16, total_width * 0.10, total_width * 0.10, total_width * 0.18, total_width * 0.18, total_width * 0.14, total_width * 0.14]
+    # MODIFICACIÓN: Ajuste de anchos para 6 columnas. El ancho del margen (0.10) se suma a Producto (0.16 + 0.10 = 0.26)
+    col_widths = [total_width * 0.26, total_width * 0.10, total_width * 0.18, total_width * 0.18, total_width * 0.14, total_width * 0.14]
 
     for index, row in df_detalle_final.iterrows():
         
@@ -364,7 +366,6 @@ def generate_pdf_reportlab(data):
         table_data.append([
             row['Receta'], 
             f"{row['Litros']:,.2f} L", 
-            f"{row['Margen_Ganancia']:.2f} %", 
             f"${precio_unitario_cliente_ars:,.2f}", 
             f"USD ${precio_unitario_cliente_usd:,.2f}", 
             f"${total_a_pagar_ars:,.2f}",
@@ -389,7 +390,7 @@ def generate_pdf_reportlab(data):
     
     story.append(Paragraph(f"**Volumen Total del Pedido:** {litros_total_acumulado:,.2f} Litros", styles['BodyTextBold']))
     
-    story.append(Paragraph(f"**Precio Promedio por Litro a Pagar (Cliente):** ${precio_unitario_ars_litro_AVG:,.2f} ARS/L (USD ${precio_unitario_usd_litro_AVG:,.2f}/L)", styles['BodyTextBold']))
+    #story.append(Paragraph(f"**Precio Promedio por Litro a Pagar (Cliente):** ${precio_unitario_ars_litro_AVG:,.2f} ARS/L (USD ${precio_unitario_usd_litro_AVG:,.2f}/L)", styles['BodyTextBold']))
     
     story.append(Spacer(1, 0.1*inch))
     
