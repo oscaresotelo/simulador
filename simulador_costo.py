@@ -139,7 +139,7 @@ def get_detalle_gastos_operativos_mensual(mes: int, anio: int):
     return df_gastos
 
 # =================================================================================================
-# FUNCIONES DE COSTEO DE MATERIA PRIMA (SIN CAMBIOS EN LA LÓGICA)
+# FUNCIONES DE COSTEO DE MATERIA PRIMA (MODIFICADA LA LÓGICA DE RETORNO)
 # =================================================================================================
 
 def obtener_todas_materias_primas(conn):
@@ -217,6 +217,7 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
     
     costo_total_mp_ars = 0.0
     costo_total_recargo_mp_ars = 0.0 
+    costo_total_mp_usd = 0.0 # <-- AÑADIDO: Costo total de MP (Base + Recargo) en USD
     
     for index, ingrediente in ingredientes_df.iterrows():
         materia_prima_id = ingrediente["materia_prima_id"]
@@ -271,6 +272,7 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
         
         costo_total_mp_ars += costo_base_mp_total_ars
         costo_total_recargo_mp_ars += recargo_mp_total_ars_ingrediente 
+        costo_total_mp_usd += costo_total_usd_ingrediente # <-- AÑADIDO: Acumular costo total MP en USD
         
         detalle_costo.append({
             "Materia Prima": nombre_mp,
@@ -290,7 +292,8 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
     detalle_df = pd.DataFrame(detalle_costo) 
     costo_mp_total = detalle_df["Costo Total ARS"].sum() 
     
-    return costo_mp_total, detalle_df, costo_total_mp_ars, costo_total_recargo_mp_ars
+    # <-- RETORNO MODIFICADO: Ahora incluye el costo_total_mp_usd
+    return costo_mp_total, detalle_df, costo_total_mp_ars, costo_total_recargo_mp_ars, costo_total_mp_usd
 
 
 # =================================================================================================
@@ -818,13 +821,15 @@ def main():
     # --- LÓGICA DE CÁLCULO EN VIVO ---
     ingredientes_a_calcular = ingredientes_df[~ingredientes_df['Quitar']].copy()
     
-    costo_mp_total, detalle_costo_df, costo_mp_base_ars, costo_recargo_mp_ars = calcular_costo_total(
+    # CAMBIO: Recibir el nuevo retorno costo_total_mp_usd
+    costo_mp_total, detalle_costo_df, costo_mp_base_ars, costo_recargo_mp_ars, costo_total_mp_usd = calcular_costo_total(
         ingredientes_a_calcular, 
         cotizacion_dolar_actual, 
         conn
     )
     
-    costo_mp_base_usd = costo_mp_base_ars / cotizacion_dolar_actual
+    # ELIMINADO: Removido el cálculo redundante/confuso de costo_mp_base_usd
+    # costo_mp_base_usd = costo_mp_base_ars / cotizacion_dolar_actual
     
     # --------------------------------------------------------------------------
     # CÁLCULOS DE COSTOS FIJOS (USA EL VALOR EDITADO/TEMPORAL: gasto_fijo_mensual_auto)
@@ -837,8 +842,15 @@ def main():
     # Costo Total Final = Costo MP Base ARS + Recargo 3% USD (ARS) + Flete General + Indirecto Operativo
     costo_total_final = costo_mp_base_ars + costo_recargo_mp_ars + costo_flete_total_ars + gasto_indirecto_tanda
     
-    # --- CONVERSIÓN A DÓLARES ---
-    costo_total_final_usd = costo_total_final / cotizacion_dolar_actual
+    # --- CONVERSIÓN A DÓLARES (CORREGIDA) ---
+    
+    # Conversión de los costos en ARS a USD, usando el dólar actual
+    costo_flete_total_usd = costo_flete_total_ars / cotizacion_dolar_actual
+    gasto_indirecto_tanda_usd = gasto_indirecto_tanda / cotizacion_dolar_actual
+    
+    # Costo Total Final USD = Costo Total MP USD (Fijo) + Flete USD (Variable) + Overhead USD (Variable)
+    costo_total_final_usd = costo_total_mp_usd + costo_flete_total_usd + gasto_indirecto_tanda_usd
+    
     costo_por_litro_ars = costo_total_final / cantidad_litros 
     costo_por_litro_usd = costo_total_final_usd / cantidad_litros
     # -----------------------------
@@ -854,12 +866,15 @@ def main():
     col_res1, col_res2, col_res3 = st.columns(3) 
     
     # --------------------------------------------------------------------------------------
-    # CÁLCULOS DISCRIMINADOS
+    # CÁLCULOS DISCRIMINADOS (MODIFICADO PARA MOSTRAR USD COMO VALOR PRINCIPAL)
     # --------------------------------------------------------------------------------------
+    # Se calcula el costo de MP (Base, sin recargo) en USD
+    costo_mp_base_solo_usd = costo_total_mp_usd - (costo_recargo_mp_ars / cotizacion_dolar_actual)
+    
     col_res1.metric(
         "Costo Materia Prima (Base)",
-        f"${costo_mp_base_ars:,.2f} ARS",
-        help=f"Equivalente a USD ${costo_mp_base_usd:,.2f}"
+        f"USD ${costo_mp_base_solo_usd:,.2f}", # <--- CAMBIO PRINCIPAL: Muestra USD
+        help=f"Equivalente a ARS ${costo_mp_base_ars:,.2f} (a la cotización actual)" # <--- CAMBIO EN HELP: Muestra ARS
     )
     col_res1.metric(
         "Recargo 3% USD MP (Total)", 
@@ -869,11 +884,12 @@ def main():
     col_res2.metric(
         "Flete General (Escalado)",
         f"${costo_flete_total_ars:,.2f} ARS",
-        help=f"Costo Flete Base ({BASE_LITROS:.0f}L, Manual): ${st.session_state['flete_base_200l']:,.2f} ARS"
+        help=f"Costo Flete Base ({BASE_LITROS:.0f}L, Manual): ${st.session_state['flete_base_200l']:,.2f} ARS (USD: ${costo_flete_total_usd:,.2f})"
     )
     col_res3.metric(
         "Gasto Indirecto Tanda (Overhead)",
-        f"${gasto_indirecto_tanda:,.2f} ARS"
+        f"${gasto_indirecto_tanda:,.2f} ARS",
+        help=f"Equivalente a USD ${gasto_indirecto_tanda_usd:,.2f}"
     )
     # --------------------------------------------------------------------------------------
 
