@@ -257,11 +257,9 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
     
     RECARGO_FIJO_USD_PERCENT = 0.03 # 3%
     
-    costo_total_mp_ars = 0.0 # Costo total base de MP en ARS
-    costo_total_recargo_mp_ars = 0.0 # Costo total del recargo de MP en ARS
-    costo_total_mp_usd = 0.0 # Costo total de MP (Base + Recargo) en USD
-    costo_total_mp_ars_base = 0.0 # Variable agregada para consistencia con el retorno
-
+    costo_total_mp_ars = 0.0
+    costo_total_recargo_mp_ars = 0.0 
+    costo_total_mp_usd = 0.0 # <-- AÑADIDO: Costo total de MP (Base + Recargo) en USD
     
     for index, ingrediente in ingredientes_df.iterrows():
         materia_prima_id = ingrediente["materia_prima_id"]
@@ -315,9 +313,9 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
         costo_unitario_usd_total = precio_base_usd_final + recargo_unitario_usd 
         costo_total_usd_ingrediente = cantidad_usada * costo_unitario_usd_total 
         
-        costo_total_mp_ars_base += costo_base_mp_total_ars # Acumular costo total base MP en ARS
+        costo_total_mp_ars += costo_base_mp_total_ars
         costo_total_recargo_mp_ars += recargo_mp_total_ars_ingrediente 
-        costo_total_mp_usd += costo_total_usd_ingrediente 
+        costo_total_mp_usd += costo_total_usd_ingrediente # <-- AÑADIDO: Acumular costo total MP en USD
         
         detalle_costo.append({
             "Materia Prima": nombre_mp,
@@ -335,9 +333,10 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
         })
 
     detalle_df = pd.DataFrame(detalle_costo) 
-    costo_mp_total = detalle_df["Costo Total ARS"].sum() # Costo total (base + recargo) en ARS
+    costo_mp_total = detalle_df["Costo Total ARS"].sum() 
     
-    return costo_mp_total, detalle_df, costo_total_mp_ars_base, costo_total_recargo_mp_ars, costo_total_mp_usd
+    # <<< CORRECCIÓN: Se usa detalle_df en lugar de detalle_costo_df >>>
+    return costo_mp_total, detalle_df, costo_total_mp_ars, costo_total_recargo_mp_ars, costo_total_mp_usd
 
 
 # =================================================================================================
@@ -347,6 +346,11 @@ def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
 def generate_pdf_reportlab(data):
     """
     Genera el contenido PDF del presupuesto usando la librería ReportLab.
+    
+    MODIFICACIÓN: Muestra el precio unitario por UNIDAD DE ENVASE (ARS/u. y USD/u.) en lugar de por Litro.
+    CORRECCIÓN: Ajuste de anchos y títulos de columna para evitar superposición.
+    
+    [MODIFICACIÓN CLAVE] Muestra el tipo de envase con su capacidad.
     """
     
     cliente_nombre = data['cliente_nombre']
@@ -354,12 +358,15 @@ def generate_pdf_reportlab(data):
     cotizacion_dolar_actual = data['cotizacion_dolar_actual']
     presupuesto_id = data['presupuesto_id']
     
+    # Nota: Aquí se asume que df_detalle_final_presupuesto ya tiene la columna 'Litros' (L mayúscula)
+    # y 'Receta' (R mayúscula) y Capacidad_Litros.
+    df_detalle_final = data['df_detalle_final_presupuesto'].copy()
+    
     precio_unitario_ars_litro_AVG = data['precio_unitario_ars_litro'] 
     precio_final_ars = data['precio_final_ars']
     litros_total_acumulado = data['litros_total_acumulado']
     
-    df_detalle_final = data['df_detalle_final_presupuesto'].copy()
-    
+    precio_unitario_usd_litro_AVG = precio_unitario_ars_litro_AVG / cotizacion_dolar_actual
     precio_final_usd = precio_final_ars / cotizacion_dolar_actual
     
     buffer = io.BytesIO()
@@ -393,11 +400,10 @@ def generate_pdf_reportlab(data):
     
     table_data = []
     
-    # CORRECCIÓN DE ENCABEZADO: Títulos más cortos para caber en el ancho
+    # CORRECCIÓN DE ENCABEZADO: Eliminar "Tipo Envase"
     table_data.append([
         "Producto", 
         "Volumen (L)", 
-        "Tipo Envase",  
         "Unidades",  
         "P. Unit. (ARS/u.)", 
         "P. Unit. (USD/u.)", 
@@ -407,27 +413,30 @@ def generate_pdf_reportlab(data):
     
     total_width = 10.3 * inch # A4 Horizontal es de 11.7, 10.3 es el espacio útil
     
-    # CORRECCIÓN DE ANCHOS: Asignación de anchos más lógicos y ajustados para 8 columnas
+    # CORRECCIÓN DE ANCHOS: Ajustar a 7 columnas
+    # Distribuir el espacio que deja Envase_Nombre (0.15) entre Producto y Volumen
     col_widths = [
-        total_width * 0.25, # Producto (Necesita más espacio)
-        total_width * 0.08, # Volumen (L)
-        total_width * 0.15, # Tipo Envase
-        total_width * 0.09, # Unidades
-        total_width * 0.11, # P. Unit. (ARS/u.)
-        total_width * 0.11, # P. Unit. (USD/u.)
-        total_width * 0.11, # Total (ARS)
+        total_width * 0.30, # Producto (Aumentado de 0.25 a 0.30)
+        total_width * 0.10, # Volumen (L) (Aumentado de 0.08 a 0.10)
+        # total_width * 0.15, # Tipo Envase (ELIMINADO)
+        total_width * 0.10, # Unidades (Aumentado de 0.09 a 0.10)
+        total_width * 0.13, # P. Unit. (ARS/u.) (Aumentado de 0.11 a 0.13)
+        total_width * 0.13, # P. Unit. (USD/u.) (Aumentado de 0.11 a 0.13)
+        total_width * 0.14, # Total (ARS) (Aumentado de 0.11 a 0.14)
         total_width * 0.10  # Total (USD)
     ]
     
-    # La lógica para poblar la tabla se mantiene igual, pero la revisamos para asegurar que no haya errores
+    # [MODIFICACIÓN CLAVE] Obtener el conjunto único de envases con su capacidad
+    unique_envases_display = set()
+    
+    # La lógica para poblar la tabla se mantiene igual, pero quitando la columna Envase_Nombre
     for index, row in df_detalle_final.iterrows():
         
-        # Las columnas usadas aquí deben ser las renombradas en el bloque de guardado (línea 1849)
         total_a_pagar_ars = row['Precio_Venta_Total_ARS']
         total_a_pagar_usd = row['Precio_Venta_Total_USD'] 
         
-        # Columnas aseguradas por la corrección en el bloque de guardado/impresión
         envase_nombre = row.get('Envase_Nombre', 'N/A')
+        capacidad = row.get('Capacidad_Litros', 0.0) # Se usa para el resumen, no para la tabla
         unidades_envase_total = row.get('Unidades_Envase_Total', 0)
         
         precio_por_envase_ars = 0.0
@@ -441,22 +450,31 @@ def generate_pdf_reportlab(data):
         table_data.append([
             # Usamos el nuevo estilo 'BodyTableText' para el wrap
             Paragraph(row['Receta'], style_table_body), 
-            f"{row['Litros']:,.2f} L", 
-            envase_nombre, 
+            f"{row['Litros']:,.2f} L", # Se espera 'Litros' con L mayúscula
+            # envase_nombre, # ELIMINADO
             f"{unidades_envase_total:,.0f}", 
             f"${precio_por_envase_ars:,.2f}", 
             f"USD ${precio_por_envase_usd:,.2f}", 
             f"${total_a_pagar_ars:,.2f}",
             f"USD ${total_a_pagar_usd:,.2f}" 
         ])
-    
+        
+        # Llenar el conjunto de envases para el resumen
+        if envase_nombre and envase_nombre != 'Sin Envase' and capacidad > 0:
+            display_name = f"{envase_nombre} {capacidad:,.2f} L"
+            unique_envases_display.add(display_name)
+        elif envase_nombre and envase_nombre != 'Sin Envase' and capacidad == 0.0:
+            unique_envases_display.add(envase_nombre)
+
+
     table = Table(table_data, colWidths=col_widths)
     table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#DBEAFE')), 
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#1E3A8A')), 
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('ALIGN', (3, 1), (-1, -1), 'RIGHT'), # Alinear Unidades, Precios y Totales a la derecha
-        ('ALIGN', (1, 1), (1, -1), 'RIGHT'), # Alinear Volumen (L) a la derecha
+        # Ajustar alineación a la derecha para las 6 columnas restantes (índices 2 a 6)
+        ('ALIGN', (2, 1), (-1, -1), 'RIGHT'), # Unidades, Precios y Totales
+        ('ALIGN', (1, 1), (1, -1), 'RIGHT'), # Volumen (L) a la derecha
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, 0), 10), 
@@ -470,6 +488,11 @@ def generate_pdf_reportlab(data):
     
     # Totales Finales
     story.append(Paragraph(f"**Volumen Total del Pedido:** {litros_total_acumulado:,.2f} Litros", styles['BodyTextBold']))
+    
+    # [MODIFICACIÓN CLAVE] Mostrar el detalle de envases utilizados con capacidad
+    envases_str = ", ".join(unique_envases_display) if unique_envases_display else "No se especificó envase."
+    story.append(Paragraph(f"**Tipos de Envase Utilizados:** {envases_str}", styles['BodyTextBold']))
+    
     story.append(Spacer(1, 0.1*inch))
     
     story.append(Paragraph(f"**TOTAL FINAL A PAGAR: ${precio_final_ars:,.2f} ARS**", 
@@ -645,62 +668,69 @@ def main():
                 key="editor_gastos_operativos"
             )
             # 5. Recalcular el total y actualizar el session state
-            if not edited_df_gastos.empty:
-                total_db_simulacion = edited_df_gastos['Monto_ARS'].sum()
-                st.session_state.gasto_fijo_mensual_total = total_db_simulacion
-            else:
-                 st.session_state.gasto_fijo_mensual_total = 0.0
-
+            total_db_simulacion = edited_df_gastos['Monto_ARS'].sum()
+            st.session_state.gasto_fijo_mensual_total = total_db_simulacion
+            
             # Botón para limpiar los gastos temporales
-            if st.button("Limpiar Gastos Temporales (de la lista)"):
-                st.session_state.gastos_temporales_simulacion = []
+            if st.button("🗑️ Limpiar Gastos Temporales", key="clear_temp_gastos_button"):
+                st.session_state.gastos_temporales_simulacion = [g for g in st.session_state.gastos_temporales_simulacion if not g['ID_Gasto_Unico'].startswith('TEMP_')]
                 st.rerun()
         else:
-            st.info("No hay gastos fijos registrados en la DB para este mes/año ni gastos temporales.")
+            st.warning("No hay gastos fijos registrados para este mes y año. Por favor, agregue un Gasto Temporal si desea simular un Overhead.")
+            st.session_state.gasto_fijo_mensual_total = 0.0
 
-    # -----------------------------------------------------------
-    # 4. VOLUMEN MENSUAL Y CÁLCULO DE OVERHEAD
-    # -----------------------------------------------------------
     st.sidebar.markdown("---")
-    st.sidebar.subheader("Cálculo de Overhead")
 
-    volumen_mensual_auto = VOLUMEN_MENSUAL_AUTOMATICO
-    st.sidebar.markdown(f"**Volumen Mensual (Automático - {RECETAS_DIARIAS} tandas/día, {DIAS_HABILES_FIJOS_MENSUAL} días):** {volumen_mensual_auto:,.2f} L")
-    
-    volumen_mensual_manual = st.sidebar.number_input(
-        "Volumen Mensual a Proyectar (L) - Opcional:", 
+    # -----------------------------------------------------------
+    # 4. ENTRADA DEL FLETE BASE (ARS)
+    # -----------------------------------------------------------
+    st.sidebar.subheader("Costo de Flete (ARS)")
+    flete_base_200l = st.sidebar.number_input(
+        f"Costo Base de Flete para {BASE_LITROS:.0f}L (ARS):", 
         min_value=0.0, 
-        value=volumen_mensual_auto, 
+        value=st.session_state.get('flete_base_200l', 5000.0), 
         step=100.0, 
-        format="%.2f",
-        key="volumen_mensual_manual",
-        help="Si es 0, se usa el valor automático. Este volumen se usa para calcular el costo indirecto por litro."
+        format="%.2f", 
+        key="flete_base_input"
     )
+    st.session_state['flete_base_200l'] = flete_base_200l
     
-    volumen_a_usar = volumen_mensual_manual if volumen_mensual_manual > 0.0 else volumen_mensual_auto
+    st.sidebar.markdown("---")
 
-    if volumen_a_usar > 0:
-        costo_indirecto_por_litro_auto = st.session_state.gasto_fijo_mensual_total / volumen_a_usar
-        st.sidebar.metric("Costo Indirecto (Overhead) por Litro (Auto)", f"${costo_indirecto_por_litro_auto:,.4f} ARS/L")
-    else:
-        costo_indirecto_por_litro_auto = 0.0
-        st.sidebar.warning("Volumen mensual proyectado es cero, no se puede calcular Overhead/Litro.")
-        
+    # -----------------------------------------------------------
+    # 5. CÁLCULO Y AJUSTE DE OVERHEAD
+    # -----------------------------------------------------------
+    st.sidebar.subheader("Overhead (Costo Indirecto)")
+    # Se calcula el volumen mensual automático (32000L por defecto)
+    volumen_mensual_litros = st.sidebar.number_input(
+        "Volumen Mensual a Producir (Litros):", 
+        min_value=BASE_LITROS, 
+        value=VOLUMEN_MENSUAL_AUTOMATICO, 
+        step=BASE_LITROS,
+        format="%.2f", 
+        key="volumen_mensual_litros"
+    )
+
+    costo_indirecto_por_litro_auto = 0.0
+    if volumen_mensual_litros > 0:
+        costo_indirecto_por_litro_auto = gasto_fijo_mensual_auto / volumen_mensual_litros
+    
+    st.sidebar.metric("Costo Indirecto por Litro (Automático)", f"${costo_indirecto_por_litro_auto:,.4f} ARS/L")
+
     costo_indirecto_por_litro_manual = st.sidebar.number_input(
-        "Costo Indirecto por Litro (Manual) - Opcional:", 
+        "Costo Indirecto por Litro (Manual ARS/L):", 
         min_value=0.0, 
         value=0.0, 
-        step=0.01, 
-        format="%.4f",
-        key="costo_indirecto_por_litro_manual",
-        help="Si es > 0, anula el cálculo automático de Overhead/Litro."
+        step=0.001, 
+        format="%.4f", 
+        key="costo_indirecto_manual"
     )
     
     costo_indirecto_por_litro = costo_indirecto_por_litro_manual if costo_indirecto_por_litro_manual > 0.0 else costo_indirecto_por_litro_auto
     st.sidebar.metric("Costo Indirecto por Litro (Usado)", f"${costo_indirecto_por_litro:,.2f} ARS/L")
 
     # -----------------------------------------------------------
-    # 5. COTIZACIÓN DEL DOLAR
+    # 6. COTIZACIÓN DEL DOLAR
     # -----------------------------------------------------------
     st.sidebar.markdown("---")
     st.sidebar.subheader("Cotización Dólar (ARS/USD)")
@@ -710,27 +740,11 @@ def main():
         value=st.session_state.get('dolar', 1000.0), 
         step=1.0, 
         format="%.2f", 
-        key="dolar_input",
+        key="dolar_input", 
         help="Cotización del dólar a utilizar para la conversión ARS <-> USD."
     )
     st.session_state['dolar'] = cotizacion_dolar_actual
 
-    # -----------------------------------------------------------
-    # 6. COSTO DE FLETE BASE (EJ: 200L)
-    # -----------------------------------------------------------
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Costo de Flete")
-    flete_base_200l = st.sidebar.number_input(
-        f"Costo Base de Flete ({BASE_LITROS:.0f}L):", 
-        min_value=0.0, 
-        value=st.session_state.get('flete_base_200l', 5000.0), 
-        step=100.0, 
-        format="%.2f",
-        key="flete_base_input",
-        help=f"Costo del flete para una tanda base de {BASE_LITROS:.0f}L."
-    )
-    st.session_state['flete_base_200l'] = flete_base_200l
-    
     # -----------------------------------------------------------
     # 7. SELECCIÓN Y CÁLCULO DEL ENVASE (MODIFICADO)
     # -----------------------------------------------------------
@@ -745,122 +759,144 @@ def main():
     precio_envase_unitario_ars = 0.0 # Variable para el precio convertido a ARS
     precio_envase_unitario_usd_base = 0.0
     envase_id_actual = None
-    
-    # [MODIFICACIÓN] Inicialización de Costos Totales de Empaque Adicionales
-    costo_etiqueta_total_ars = 0.0
-    costo_caja_total_ars = 0.0
-    costo_total_empaque_ars = 0.0 # Total Envase Principal + Etiqueta + Caja
+    envase_seleccionado_nombre_final = "Sin Envase"
 
+    # [MODIFICACIÓN] Inputs para Envase Manual
     envases_disponibles = obtener_envases_disponibles(conn)
     envases_map = {e['descripcion']: e for e in envases_disponibles}
     envases_nombres = ["--- Seleccionar Envase ---"] + [e['descripcion'] for e in envases_disponibles]
     
     envase_seleccionado_nombre = st.sidebar.selectbox(
-        "Envase a Utilizar:", 
+        "Envase a utilizar (DB):", 
         envases_nombres, 
         key="envase_seleccionado"
     )
+
+    st.sidebar.markdown("##### O Ingresar Envase Manualmente (Prioridad sobre DB)")
     
+    manual_envase_precio_unitario_ars = st.sidebar.number_input(
+        "Precio Envase Unitario Manual (ARS/u.):", 
+        min_value=0.0, 
+        value=0.0, 
+        step=0.01, 
+        format="%.2f", 
+        key="manual_envase_precio_unitario_ars"
+    )
+    
+    manual_envase_capacidad_litros = st.sidebar.number_input(
+        "Capacidad Envase  (Litros):", 
+        min_value=0.0, 
+        value=0.0, 
+        step=0.01, 
+        format="%.2f", 
+        key="manual_envase_capacidad_litros"
+    )
+    
+    # [MODIFICACIÓN] Inputs para Etiqueta y Caja
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Empaque Adicional (Por Envase)")
+    
+    costo_etiqueta_por_envase = st.sidebar.number_input(
+        "Costo Etiqueta (ARS/u.):", 
+        min_value=0.0, 
+        value=st.session_state.get('costo_etiqueta_por_envase', 0.0), 
+        step=0.01, 
+        format="%.2f", 
+        key="costo_etiqueta_input"
+    )
+    st.session_state['costo_etiqueta_por_envase'] = costo_etiqueta_por_envase
+    
+    costo_caja_por_envase = st.sidebar.number_input(
+        "Costo Caja (ARS/u.):", 
+        min_value=0.0, 
+        value=st.session_state.get('costo_caja_por_envase', 0.0), 
+        step=0.01, 
+        format="%.2f", 
+        key="costo_caja_input"
+    )
+    st.session_state['costo_caja_por_envase'] = costo_caja_por_envase
+    st.sidebar.markdown("---")
+    
+    # -----------------------------------------------------------
+    # 8. CÁLCULO FINAL DE COSTO DE ENVASE (LÓGICA ACTUALIZADA)
+    # -----------------------------------------------------------
+    
+    # Cantidad de litros de la tanda que se está simulando (Input principal)
+    cantidad_litros = st.session_state.get('litros', BASE_LITROS)
+    
+    costo_envase_total_ars = 0.0
+    costo_etiqueta_total_ars = 0.0
+    costo_caja_total_ars = 0.0
+    costo_total_empaque_ars = 0.0
+    costo_envase_por_litro = 0.0
+    unidades_necesarias = 0
+    capacidad_litros = 0.0
+    precio_envase_unitario_ars = 0.0
+    precio_envase_unitario_usd_base = 0.0
+
+    # 1. Determinar Capacidad y Precio
     if envase_seleccionado_nombre != "--- Seleccionar Envase ---":
-        envase_id_actual = envases_map[envase_seleccionado_nombre]['id']
+        # Se seleccionó un envase de la DB
+        envase_info = envases_map[envase_seleccionado_nombre]
+        envase_id_actual = envase_info['id']
+        envase_seleccionado_nombre_final = envase_seleccionado_nombre
         
-        # 1. Obtener precios de Envase Principal
-        precio_envase_unitario_usd_base, capacidad_litros = obtener_precio_envase_actual(conn, envase_id_actual)
-        precio_envase_unitario_ars = precio_envase_unitario_usd_base * cotizacion_dolar_actual
+        # a. Obtener precio base USD y capacidad en litros de la DB
+        precio_envase_unitario_usd_base_db, capacidad_litros_db = obtener_precio_envase_actual(conn, envase_id_actual)
         
-        st.sidebar.metric(
-            f"Capacidad del Envase: {capacidad_litros} L", 
-            f"Precio Unitario (ARS): ${precio_envase_unitario_ars:,.2f}",
-            help=f"Precio base USD: ${precio_envase_unitario_usd_base:,.2f}"
-        )
-        
-        # 2. Entrada de Costos de Empaque Adicionales (por unidad de envase)
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Costos de Empaque Adicionales (por unidad de envase)")
-        
-        costo_etiqueta_por_envase = st.sidebar.number_input(
-            "Costo Etiqueta por Envase (ARS):", 
-            min_value=0.0, 
-            value=st.session_state.get('costo_etiqueta_por_envase', 0.0), 
-            step=0.01, 
-            format="%.2f",
-            key="costo_etiqueta_input",
-        )
-        st.session_state['costo_etiqueta_por_envase'] = costo_etiqueta_por_envase
-        
-        costo_caja_por_envase = st.sidebar.number_input(
-            "Costo Caja por Envase (ARS):", 
-            min_value=0.0, 
-            value=st.session_state.get('costo_caja_por_envase', 0.0), 
-            step=0.01, 
-            format="%.2f",
-            key="costo_caja_input",
-        )
-        st.session_state['costo_caja_por_envase'] = costo_caja_por_envase
-        
+        # b. Determinar Capacidad Final
+        if manual_envase_capacidad_litros > 0.0:
+            capacidad_litros = manual_envase_capacidad_litros
+            st.sidebar.info(f"Usando Capacidad Manual: {capacidad_litros:,.2f} L (sobre DB)")
+        else:
+            capacidad_litros = capacidad_litros_db
+            
+        # c. Determinar Precio Final (Prioriza Manual ARS)
+        if manual_envase_precio_unitario_ars > 0.0:
+            precio_envase_unitario_ars = manual_envase_precio_unitario_ars
+            precio_envase_unitario_usd_base = precio_envase_unitario_ars / cotizacion_dolar_actual 
+            st.sidebar.info(f"Usando Precio Manual: ${precio_envase_unitario_ars:,.2f} ARS/u. (sobre DB)")
+        else:
+            # Usar precio de DB (convertido a ARS)
+            precio_envase_unitario_usd_base = precio_envase_unitario_usd_base_db
+            precio_envase_unitario_ars = precio_envase_unitario_usd_base_db * cotizacion_dolar_actual
+            
+    elif manual_envase_precio_unitario_ars > 0.0 and manual_envase_capacidad_litros > 0.0:
+        # Se usa solo Envase Manual (DB envase no seleccionado)
+        envase_id_actual = -1 
+        envase_seleccionado_nombre_final = "Envase Manual"
+        precio_envase_unitario_ars = manual_envase_precio_unitario_ars
+        capacidad_litros = manual_envase_capacidad_litros
+        precio_envase_unitario_usd_base = precio_envase_unitario_ars / cotizacion_dolar_actual
+        st.sidebar.info(f"Usando Envase Manual: ${precio_envase_unitario_ars:,.2f} ARS/u. @ {capacidad_litros:,.2f} L")
+    
     else:
-        st.sidebar.info("Seleccione un envase para ver su costo y capacidad.")
-        precio_envase_unitario_ars = 0.0
+        # Sin envase, sin costo
+        envase_id_actual = None
+        envase_seleccionado_nombre_final = "Sin Envase"
         precio_envase_unitario_usd_base = 0.0
 
-    # -----------------------------------------------------------
-    # FIN CONFIGURACIÓN SIDEBAR
-    # -----------------------------------------------------------
 
-
-    # --- COLUMNAS PARA RECETA Y SIMULACIÓN ---
-    col_receta, col_acciones = st.columns([0.7, 0.3])
-    
-    # <<<< INICIO LÓGICA DE RECETA >>>>
-    
-    df_recetas = fetch_df("SELECT id, nombre FROM recetas ORDER BY nombre")
-    recetas_map = {r['nombre']: r for r in df_recetas.to_dict('records')}
-    recetas_nombres = ["--- Seleccionar Receta ---"] + df_recetas['nombre'].tolist()
-
-    receta_seleccionada_nombre = col_receta.selectbox(
-        "Seleccione la Receta a Simular:", 
-        recetas_nombres, 
-        key="receta_seleccionada"
-    )
-
-    receta_id_seleccionada = None
-    if receta_seleccionada_nombre != "--- Seleccionar Receta ---":
-        receta_id_seleccionada = recetas_map[receta_seleccionada_nombre]['id']
+    # 2. Cálculo del costo
+    if capacidad_litros > 0 and (precio_envase_unitario_ars > 0.0 or costo_etiqueta_por_envase > 0.0 or costo_caja_por_envase > 0.0):
         
-    cantidad_litros = col_receta.number_input(
-        f"Volumen de la Tanda a Simular (Litros) (Base: {BASE_LITROS:.2f} L):", 
-        min_value=0.0, 
-        value=st.session_state.get('litros', BASE_LITROS), 
-        step=1.0, 
-        format="%.2f", 
-        key="litros_tanda"
-    )
-    st.session_state['litros'] = cantidad_litros
-    
-    st.session_state.receta_id_actual = receta_id_seleccionada
-
-    # -----------------------------------------------------------
-    # CÁLCULO DE UNIDADES DE ENVASE Y COSTO DE EMPAQUE
-    # -----------------------------------------------------------
-    
-    unidades_necesarias = 0
-    if cantidad_litros > 0 and capacidad_litros > 0:
+        # Calcular unidades necesarias (redondeo hacia arriba al entero)
         unidades_necesarias = int(cantidad_litros / capacidad_litros)
+        if unidades_necesarias * capacidad_litros < cantidad_litros:
+            unidades_necesarias += 1
         
-        # 1. Costo Envase Principal
-        costo_envase_total_ars = precio_envase_unitario_ars * unidades_necesarias
+        # Costo Total de Envase Principal
+        costo_envase_total_ars = unidades_necesarias * precio_envase_unitario_ars
         
-        # 2. Costo Etiqueta (Adicional)
-        costo_etiqueta_total_ars = costo_etiqueta_por_envase * unidades_necesarias
-        
-        # 3. Costo de la Caja (Adicional)
-        costo_caja_total_ars = costo_caja_por_envase * unidades_necesarias
-        
+        # Cálculo del costo de Empaque Adicional (Etiqueta y Caja)
+        costo_etiqueta_total_ars = costo_etiqueta_por_envase * unidades_necesarias # Costo de la Etiqueta (Adicional)
+        costo_caja_total_ars = costo_caja_por_envase * unidades_necesarias # Costo de la Caja (Adicional)
+
         # Costo Total de Empaque
         costo_total_empaque_ars = costo_envase_total_ars + costo_etiqueta_total_ars + costo_caja_total_ars
-        
+
         # [MODIFICACIÓN] Métricas de Desglose de Empaque
-        st.sidebar.markdown(f"**Total Envase Principal (Tanda):** ${costo_envase_total_ars:,.2f} ARS")
+        st.sidebar.markdown(f"**Total Envase Principal ({envase_seleccionado_nombre_final}):** ${costo_envase_total_ars:,.2f} ARS")
         st.sidebar.markdown(f"**Total Etiqueta (Tanda):** ${costo_etiqueta_total_ars:,.2f} ARS")
         st.sidebar.markdown(f"**Total Caja (Tanda):** ${costo_caja_total_ars:,.2f} ARS")
         
@@ -870,39 +906,75 @@ def main():
             f"${costo_envase_por_litro:,.4f} ARS/L", 
             help="Costo total de Envase Principal + Etiqueta + Caja por Litro."
         )
-        
     else:
-        unidades_necesarias = 0
-        if cantidad_litros > 0:
-             st.sidebar.warning("Seleccione un envase con capacidad > 0 para calcular unidades.")
-        elif capacidad_litros > 0:
-             st.sidebar.warning("Ingrese un volumen de tanda > 0 para calcular unidades.")
+        # Reiniciar variables
+        costo_envase_total_ars = 0.0
+        costo_etiqueta_total_ars = 0.0
+        costo_caja_total_ars = 0.0
+        costo_total_empaque_ars = 0.0
+        costo_envase_por_litro = 0.0
+        # Mostrar métrica a cero si no hay cálculo
+        st.sidebar.metric(
+            "Costo Empaque Total por Litro", 
+            f"${costo_envase_por_litro:,.4f} ARS/L", 
+            help="Costo total de Envase Principal + Etiqueta + Caja por Litro."
+        )
 
+    st.sidebar.markdown("---")
+    
+    # -----------------------------------------------------------
+    # FIN CONFIGURACIÓN SIDEBAR
+    # -----------------------------------------------------------
+
+    # --- COLUMNAS PARA RECETA Y SIMULACIÓN ---
+    col_receta, col_acciones = st.columns([0.7, 0.3])
+    conn = get_connection()
+    
+    # <<<< INICIO FIX DEL ERROR DE BASE DE DATOS >>>>
+    # Se eliminó 'descripcion' de la consulta SQL ya que no existe en la DB.
+    df_recetas = fetch_df("SELECT id, nombre FROM recetas ORDER BY nombre")
+    recetas_map = {r['nombre']: r for r in df_recetas.to_dict('records')}
+    recetas_nombres = ["--- Seleccionar Receta ---"] + df_recetas['nombre'].tolist()
+    
+    receta_seleccionada_nombre = col_receta.selectbox(
+        "Seleccione la Receta a Simular:", 
+        recetas_nombres, 
+        key="receta_seleccionada"
+    )
+    
+    receta_id_seleccionada = None
+    if receta_seleccionada_nombre != "--- Seleccionar Receta ---":
+        receta_id_seleccionada = recetas_map[receta_seleccionada_nombre]['id']
+        st.session_state.receta_id_actual = receta_id_seleccionada
 
     # -----------------------------------------------------------
-    # LÓGICA DE INGREDIENTES Y EDICIÓN (MP)
+    # CÁLCULO DE RECETA Y COSTOS
     # -----------------------------------------------------------
     
-    col_receta.markdown("---")
-    col_receta.subheader("Detalle de Materia Prima y Precios")
-    
-    ingredientes_a_calcular = pd.DataFrame()
-    ingredientes_base = []
-    
+    ingredientes_receta = []
     if receta_id_seleccionada:
-        ingredientes_base = obtener_ingredientes_receta(conn, receta_id_seleccionada)
-        ingredientes_a_calcular = pd.DataFrame(ingredientes_base)
-        ingredientes_a_calcular.rename(columns={'nombre': 'Materia Prima', 'unidad': 'Unidad', 'cantidad': 'Cantidad Base (200L)'}, inplace=True)
-        # Añadir columnas necesarias para el cálculo y la edición
-        ingredientes_a_calcular['precio_unitario_manual'] = 0.0
-        ingredientes_a_calcular['cotizacion_usd_manual'] = 1.0
-        ingredientes_a_calcular['Temporal'] = False
-        ingredientes_a_calcular['Quitar'] = False
+        ingredientes_receta = obtener_ingredientes_receta(conn, receta_id_seleccionada)
+        if ingredientes_receta:
+            ingredientes_a_calcular = pd.DataFrame(ingredientes_receta)
+            ingredientes_a_calcular.rename(columns={'nombre': 'Materia Prima', 'unidad': 'Unidad', 'cantidad': 'Cantidad Base (200L)'}, inplace=True)
+            # Agregar columnas manuales con valor 0.0 para poder ser editadas
+            ingredientes_a_calcular['precio_unitario_manual'] = 0.0
+            ingredientes_a_calcular['cotizacion_usd_manual'] = 1.0
+            ingredientes_a_calcular['Temporal'] = False
+            ingredientes_a_calcular['Quitar'] = False
+        else:
+            ingredientes_a_calcular = pd.DataFrame()
+            st.warning("La receta seleccionada no tiene ingredientes registrados.")
+    else:
+        ingredientes_a_calcular = pd.DataFrame()
     
-    # Incorporar los ingredientes temporales (manuales o actualizados)
-    temp_df = pd.DataFrame(st.session_state.ingredientes_temporales)
+    # -----------------------------------------------------------
+    # INTERFAZ PARA EDICIÓN DE MP Y AGREGAR MP TEMPORALES
+    # -----------------------------------------------------------
     
-    if not temp_df.empty:
+    # 1. Aplicar modificaciones temporales guardadas
+    if st.session_state.ingredientes_temporales and not ingredientes_a_calcular.empty:
+        temp_df = pd.DataFrame(st.session_state.ingredientes_temporales)
         temp_df.rename(columns={'nombre': 'Materia Prima', 'unidad': 'Unidad', 'cantidad_base': 'Cantidad Base (200L)', 'precio_unitario': 'precio_unitario_manual', 'cotizacion_usd': 'cotizacion_usd_manual'}, inplace=True)
         temp_df['Temporal'] = True
         temp_df['Quitar'] = False # <<< CORRECCIÓN PARA KEYERROR 'Quitar'
@@ -912,7 +984,7 @@ def main():
         
         # 2. Filtrar los ingredientes base que NO tienen una versión temporal (o son MP nuevas temp, que tienen ID -1)
         base_filtered = ingredientes_a_calcular[~ingredientes_a_calcular['materia_prima_id'].isin(temp_ids) | (ingredientes_a_calcular['materia_prima_id'] == -1)]
-
+        
         # 3. Concatenar los ingredientes base filtrados con los temporales (los temporales tienen prioridad)
         ingredientes_a_calcular = pd.concat([base_filtered, temp_df[temp_df['materia_prima_id'] != -1]], ignore_index=True)
         
@@ -920,23 +992,15 @@ def main():
         ingredientes_a_calcular = pd.concat([ingredientes_a_calcular, temp_df[temp_df['materia_prima_id'] == -1]], ignore_index=True)
 
 
-    # >>> CORRECCIÓN UNBOUNDLOCALERROR: Inicializar todas las variables de costo aquí
-    # Si 'ingredientes_a_calcular' está vacío, estas variables deben tener un valor para el cálculo posterior.
-    costo_mp_total = 0.0
-    costo_total_mp_ars_base = 0.0
-    costo_total_recargo_mp_ars = 0.0
-    costo_total_mp_usd = 0.0
-    detalle_costo_df = pd.DataFrame()
-    
-    
     if not ingredientes_a_calcular.empty:
+        
         # 1. Calcular la cantidad simulada total
         if BASE_LITROS > 0 and cantidad_litros > 0:
             ingredientes_a_calcular['cantidad_simulada'] = (ingredientes_a_calcular['Cantidad Base (200L)'] / BASE_LITROS) * cantidad_litros
         else:
             ingredientes_a_calcular['cantidad_simulada'] = 0.0
             
-        # 2. Buscar el precio base de la BD (solo para visualización)
+        # 2. Buscar el precio base de la DB (solo para visualización)
         ingredientes_a_calcular['Precio Unitario (USD) BASE'] = 0.0
         for index, row in ingredientes_a_calcular.iterrows():
             if row['materia_prima_id'] != -1 and row['precio_unitario_manual'] == 0.0:
@@ -944,46 +1008,47 @@ def main():
                 if cotizacion_usd_reg_bd > 1.0:
                     ingredientes_a_calcular.loc[index, 'Precio Unitario (USD) BASE'] = precio_unitario_reg_base
             
-        # 3. Configurar el editor
-        column_config_ingredientes = {
-            "Materia Prima": st.column_config.TextColumn(disabled=True),
+        # 3. Data Editor
+        st.subheader("Simulación de Ingredientes y Costos (ARS)")
+        
+        column_config = {
+            "materia_prima_id": st.column_config.NumberColumn(disabled=True),
+            "Materia Prima": st.column_config.TextColumn("Materia Prima", disabled=True),
             "Unidad": st.column_config.TextColumn(disabled=True),
-            "materia_prima_id": st.column_config.TextColumn(disabled=True, help="ID interno de la MP (-1 si es temporal)"),
-            "id_ingrediente_receta": st.column_config.TextColumn(disabled=True),
-            "Temporal": st.column_config.TextColumn(disabled=True),
-            "cantidad_simulada": st.column_config.NumberColumn("Cantidad (Simulada)", format="%.4f", disabled=True),
-            "Precio Unitario (USD) BASE": st.column_config.NumberColumn("Precio DB (USD)", format="%.4f", disabled=True, help="Último precio de compra en USD. Usado si Precio Manual es 0."),
             "Cantidad Base (200L)": st.column_config.NumberColumn(
                 "Cantidad Base (200L)", 
                 min_value=0.0, 
-                step=0.01, 
                 format="%.4f", 
-                help=f"Cantidad usada en la receta base de {BASE_LITROS:.0f}L. Edite aquí para simular cambios de fórmula."
+                help="Edite la cantidad base para esta simulación."
+            ),
+            "cantidad_simulada": st.column_config.NumberColumn("Cantidad (Simulada)", format="%.4f", disabled=True),
+            "Precio Unitario (USD) BASE": st.column_config.NumberColumn(
+                "P. Unit. (USD) DB", 
+                format="%.4f", 
+                disabled=True,
+                help="Precio base en USD registrado en la DB (si aplica)."
             ),
             "precio_unitario_manual": st.column_config.NumberColumn(
-                "Precio Manual (USD)", 
+                "P. Unit. Manual (USD/ARS)", 
                 min_value=0.0, 
-                step=0.01, 
-                format="%.4f", 
-                help="Precio unitario manual en USD. Si es > 0, anula el precio de la DB."
+                format="%.4f",
+                help="Ingrese un precio unitario manual. Se interpreta como USD si Cotización > 1.0, o ARS si Cotización = 1.0."
             ),
             "cotizacion_usd_manual": st.column_config.NumberColumn(
-                "Cotización Manual (ARS/USD)", 
+                "Cotización Manual (USD)", 
                 min_value=1.0, 
-                # Se eliminó el 'value' que causaba el primer error
-                step=1.0, 
-                format="%.2f", 
-                help="Cotización del dólar a aplicar solo a esta MP (si aplica y Precio Manual > 0)."
+                format="%.2f",
+                help="Ingrese la cotización USD de compra para el precio manual."
             ),
-            "Quitar": st.column_config.CheckboxColumn("Quitar", default=False, help="Marque para excluir de esta simulación.")
+            "Temporal": st.column_config.CheckboxColumn(disabled=True),
+            "Quitar": st.column_config.CheckboxColumn("Quitar de Simulación")
         }
         
-        # 4. Mostrar el editor de datos
-        edited_ingredientes_df = col_receta.data_editor(
+        edited_ingredientes_df = st.data_editor(
             ingredientes_a_calcular,
-            column_config=column_config_ingredientes,
-            hide_index=True,
+            column_config=column_config,
             use_container_width=True,
+            hide_index=True,
             column_order=[
                 "Materia Prima", "Unidad", "Cantidad Base (200L)", "cantidad_simulada", 
                 "Precio Unitario (USD) BASE", "precio_unitario_manual", "cotizacion_usd_manual", 
@@ -991,17 +1056,14 @@ def main():
             ],
             key="editor_ingredientes"
         )
-
+        
         # 5. Actualizar el Session State con los cambios para persistencia
         st.session_state.ingredientes_temporales = []
         for index, row in edited_ingredientes_df.iterrows():
-            # Buscar el valor original para comparación
-            original_row = ingredientes_a_calcular.loc[index]
-
             # Si la cantidad base o el precio manual se modificó, o si es temporal (ID -1), guardar en temporales
-            is_modified = row['Cantidad Base (200L)'] != original_row['Cantidad Base (200L)']
-            is_modified = is_modified or row['precio_unitario_manual'] != original_row['precio_unitario_manual']
-            is_modified = is_modified or row['cotizacion_usd_manual'] != original_row['cotizacion_usd_manual']
+            is_modified = row['Cantidad Base (200L)'] != ingredientes_a_calcular.loc[index, 'Cantidad Base (200L)']
+            is_modified = is_modified or row['precio_unitario_manual'] != ingredientes_a_calcular.loc[index, 'precio_unitario_manual']
+            is_modified = is_modified or row['cotizacion_usd_manual'] != ingredientes_a_calcular.loc[index, 'cotizacion_usd_manual']
             
             if is_modified or row['materia_prima_id'] == -1:
                 # Guardar el estado modificado
@@ -1021,41 +1083,55 @@ def main():
         # 7. Ejecutar el cálculo del costo
         costo_mp_total, detalle_costo_df, costo_total_mp_ars_base, costo_total_recargo_mp_ars, costo_total_mp_usd = \
             calcular_costo_total(ingredientes_a_calcular, cotizacion_dolar_actual, conn)
-
+        
         # Guardar resultados en Session State
         st.session_state['costo_total'] = costo_mp_total
         st.session_state['detalle_costo'] = detalle_costo_df
     
     else:
         st.warning("Seleccione una receta o añada materias primas temporales para comenzar.")
-        # La inicialización a 0.0 ya se hizo antes del 'if' para evitar el UnboundLocalError
-        # Las variables mantienen su valor de 0.0 si el bloque 'if' es omitido.
+        # Aunque ya están inicializados, se reasignan aquí por seguridad/claridad
+        costo_mp_total = 0.0
+        costo_total_mp_usd = 0.0
+        detalle_costo_df = pd.DataFrame()
+        costo_total_recargo_mp_ars = 0.0 
 
 
+    # Reasignación de seguridad
+    # =================================================================================================
+    # CÁLCULO DE FLETE, OVERHEAD Y TOTALES (MODIFICADO)
+    # =================================================================================================
+    
+    # 1. Costo de Flete
+    if cantidad_litros > 0 and BASE_LITROS > 0:
+        factor_escala = cantidad_litros / BASE_LITROS
+        costo_flete_total_ars = flete_base_200l * factor_escala
+        costo_flete_por_litro = costo_flete_total_ars / cantidad_litros
+    else:
+        costo_flete_total_ars = 0.0
+        costo_flete_por_litro = 0.0
+
+    # 2. Costo de Overhead (Gasto Indirecto)
+    gasto_indirecto_tanda = costo_indirecto_por_litro * cantidad_litros
+    
+    # 3. Costo total de Envase y Empaque (ya calculado en el sidebar)
+    costo_envase_total_ars_principal = costo_envase_total_ars # Renombrar para claridad
+    
+    # 4. Costo Total Final de Producción
+    costo_total_final = costo_mp_total + costo_flete_total_ars + gasto_indirecto_tanda + costo_total_empaque_ars
+    
+    # 5. Costo por Litro
+    costo_por_litro_ars = costo_total_final / cantidad_litros if cantidad_litros > 0 else 0.0
+    costo_por_litro_usd = costo_por_litro_ars / cotizacion_dolar_actual
+    
     # -----------------------------------------------------------
-    # RESULTADOS DE COSTO TOTAL
+    # RESULTADOS DE COSTEO
     # -----------------------------------------------------------
     st.markdown("---")
-    st.subheader("Resumen de Costos de Producción (Tanda Simulada)")
-
-    # Cálculo final de costos
-    costo_indirecto_total_ars = costo_indirecto_por_litro * cantidad_litros
-    
-    # Flete escalado
-    costo_flete_total_ars = (flete_base_200l / BASE_LITROS) * cantidad_litros if BASE_LITROS > 0 else 0.0
-    
-    # Costo Total Final = MP + Flete + Overhead + Empaque
-    # Las variables costo_mp_total, costo_total_recargo_mp_ars, costo_total_mp_usd están garantizadas con un valor (0.0 o el calculado)
-    costo_total_final = costo_mp_total + costo_flete_total_ars + costo_indirecto_total_ars + costo_total_empaque_ars
-    
-    # Costo por Litro
-    costo_por_litro_ars = costo_total_final / cantidad_litros if cantidad_litros > 0 else 0.0
-    costo_por_litro_usd = costo_por_litro_ars / cotizacion_dolar_actual if cotizacion_dolar_actual > 0 else 0.0
-    
+    st.subheader("Resumen de Costos de la Simulación")
     col_res1, col_res2, col_res3 = st.columns(3)
     
-    # Costo de Materia Prima (Base, sin recargo) en USD
-    # ESTE BLOQUE AHORA ESTÁ SEGURO POR LA INICIALIZACIÓN DE costo_total_recargo_mp_ars
+    # Asegurarse de que el costo de MP (Base, sin recargo) en USD
     if cotizacion_dolar_actual > 0:
         costo_mp_base_solo_usd = costo_total_mp_usd - (costo_total_recargo_mp_ars / cotizacion_dolar_actual)
     else:
@@ -1066,118 +1142,102 @@ def main():
         f"${costo_total_final:,.2f}", 
         help="Costo Total de Producción (MP + Flete + Overhead + Empaque)."
     )
-    
     # [MODIFICACIÓN] Métrica de Costo Total de Empaque
     col_res2.metric(
         "Costo Total Empaque (ARS)", 
         f"${costo_total_empaque_ars:,.2f}", 
-        help=f"Costo Total de Envase Principal (${costo_envase_total_ars:,.2f}) + Etiqueta (${costo_etiqueta_total_ars:,.2f}) + Caja (${costo_caja_total_ars:,.2f}) para {unidades_necesarias:,.0f} u."
+        help=f"Costo Total de Envase Principal (${costo_envase_total_ars_principal:,.2f}) + Etiqueta (${costo_etiqueta_total_ars:,.2f}) + Caja (${costo_caja_total_ars:,.2f}) para {unidades_necesarias:,.0f} u."
     )
-    
     col_res3.metric(
         "Costo por Litro (ARS/L)", 
         f"${costo_por_litro_ars:,.4f}", 
         help="Costo Total / Litros."
     )
-    
     col_res1.metric(
         "Costo Materia Prima (USD)", 
         f"USD ${costo_total_mp_usd:,.2f}", 
         help="Costo Total de MP (Base USD + Recargo 3%)."
     )
-    
     col_res2.metric(
-        "Costo Total Flete/Overhead (ARS)", 
-        f"${costo_flete_total_ars + costo_indirecto_total_ars:,.2f}", 
-        help=f"Costo del flete escalado para {cantidad_litros:,.2f} L + Costo Indirecto (Overhead)."
+        "Costo Total Flete (ARS)", 
+        f"${costo_flete_total_ars:,.2f}", 
+        help=f"Costo del flete escalado para {cantidad_litros:,.2f} L."
     )
-    
     col_res3.metric(
         "Costo por Litro (USD/L)", 
         f"USD ${costo_por_litro_usd:,.4f}", 
         help="Costo Total / Litros."
     )
-
     st.markdown("---")
+
     st.subheader("Desglose de Costo de Materia Prima")
-    
     if not detalle_costo_df.empty:
         col_config_detalle = {
             "Materia Prima": st.column_config.TextColumn(disabled=True),
             "Unidad": st.column_config.TextColumn(disabled=True),
             "Cantidad (Simulada)": st.column_config.NumberColumn(format="%.4f"),
             "Moneda Origen": st.column_config.TextColumn(disabled=True),
-            "Costo Unit. ARS (Base)": st.column_config.NumberColumn(format="$ %.4f", disabled=True),
-            "Recargo 3% ARS (Unit.)": st.column_config.NumberColumn(format="$ %.4f", disabled=True),
-            "Costo Unit. ARS (Total)": st.column_config.NumberColumn(format="$ %.4f", disabled=True),
-            "Costo Total ARS": st.column_config.NumberColumn(format="$ %.2f", disabled=True),
-            "Costo Unit. USD (Base)": st.column_config.NumberColumn(format="$ %.4f", disabled=True),
-            "Recargo 3% USD (Unit.)": st.column_config.NumberColumn(format="$ %.4f", disabled=True),
-            "Costo Unit. USD (Total)": st.column_config.NumberColumn(format="$ %.4f", disabled=True),
-            "Costo Total USD": st.column_config.NumberColumn(format="$ %.2f", disabled=True)
+            "Costo Unit. ARS (Base)": st.column_config.NumberColumn(format="%.4f", help="Costo de MP sin recargo, a la cotización actual."),
+            "Recargo 3% ARS (Unit.)": st.column_config.NumberColumn(format="%.4f"),
+            "Costo Unit. ARS (Total)": st.column_config.NumberColumn(format="%.4f"),
+            "Costo Total ARS": st.column_config.NumberColumn(format="%.2f"),
+            "Costo Unit. USD (Base)": st.column_config.NumberColumn(format="%.4f"),
+            "Recargo 3% USD (Unit.)": st.column_config.NumberColumn(format="%.4f"),
+            "Costo Unit. USD (Total)": st.column_config.NumberColumn(format="%.4f"),
+            "Costo Total USD": st.column_config.NumberColumn(format="%.2f")
         }
-        st.dataframe(
-            detalle_costo_df, 
-            column_config=col_config_detalle, 
-            hide_index=True, 
-            use_container_width=True
-        )
-    else:
-        st.info("El detalle de costos de materia prima estará disponible al seleccionar una receta o añadir MPs temporales.")
+        st.dataframe(detalle_costo_df, column_config=col_config_detalle, use_container_width=True, hide_index=True)
 
-    # -----------------------------------------------------------
-    # FORMULARIOS PARA AÑADIR/ACTUALIZAR MATERIA PRIMA MANUALMENTE
-    # -----------------------------------------------------------
+    # --------------------------------------------------------------------------------------
+    # ACCIONES: AGREGAR MATERIA PRIMA TEMPORAL / LIMPIAR
+    # --------------------------------------------------------------------------------------
     st.markdown("---")
-    st.subheader("Herramientas de Simulación Manual de MP")
-    col_mp_nueva, col_mp_existente = st.columns(2)
-
-    # A. AÑADIR MATERIA PRIMA NUEVA (ID -1)
-    with col_mp_nueva.form("form_mp_nueva_simulacion"): # << CORRECTO: Abre el formulario en la columna >>
-        st.markdown("**Añadir Materia Prima (Nueva/Temporal)**")
-        mp_nombre = st.text_input("Nombre de la MP:", key="mp_nueva_nombre")
+    st.subheader("Acciones Adicionales de Simulación")
+    col_mp_nueva, col_mp_existente, col_limpiar = st.columns(3)
+    
+    # --------------------------------------------------------------------------------------
+    # A. AÑADIR MATERIA PRIMA NUEVA
+    # --------------------------------------------------------------------------------------
+    with col_mp_nueva.form("form_mp_nueva_simulacion"):
+        col_mp_nueva.markdown("**Añadir Materia Prima (Nueva)**")
+        mp_nombre_nuevo = st.text_input("Nombre de Materia Prima (Nueva):", key="mp_nueva_nombre")
+        col_cant_n, col_unidad_n = col_mp_nueva.columns([0.6, 0.4])
+        cantidad_base_n = col_cant_n.number_input(f"Cantidad Base ({BASE_LITROS:.0f}L):", min_value=0.0, value=0.0, step=0.01, format="%.4f", key="mp_nueva_cantidad")
+        unidad_n = col_unidad_n.text_input("Unidad:", value="kg", key="mp_nueva_unidad")
+        col_precio_n, col_cot_n = col_mp_nueva.columns(2)
+        precio_unitario_usd_n = col_precio_n.number_input("Precio Manual (USD):", min_value=0.0, value=0.0, step=0.01, format="%.4f", key="mp_nueva_precio_usd")
+        cotizacion_usd_n = col_cot_n.number_input("Cotización USD de Compra/Referencia:", min_value=1.0, value=cotizacion_dolar_actual, step=1.0, format="%.2f", key="mp_nueva_cotizacion_usd")
         
-        # << CORREGIDO: Usar st.columns() >>
-        col_cant, col_unidad = st.columns([0.6, 0.4]) 
-        cantidad_base = col_cant.number_input(f"Cantidad Base ({BASE_LITROS:.0f}L):", min_value=0.0, value=0.0, step=0.01, format="%.4f", key="mp_nueva_cantidad")
-        unidad = col_unidad.text_input("Unidad:", key="mp_nueva_unidad")
+        submitted_nueva = st.form_submit_button("Agregar MP Temporal (Nueva)")
         
-        # << CORREGIDO: Usar st.columns() >>
-        col_precio, col_cot = st.columns(2) 
-        precio_unitario_usd = col_precio.number_input("Precio Manual (USD):", min_value=0.0, value=0.0, step=0.01, format="%.4f", key="mp_nueva_precio_usd")
-        cotizacion_usd = col_cot.number_input("Cotización Manual (ARS/USD):", min_value=1.0, value=1.0, step=1.0, format="%.2f", key="mp_nueva_cotizacion_usd")
-        
-        # << CORREGIDO: Usar st.form_submit_button() >>
-        submitted_mp_nueva = st.form_submit_button("Agregar MP Temporal")
-        
-        if submitted_mp_nueva:
-            if mp_nombre and unidad and cantidad_base > 0 and precio_unitario_usd > 0 and cotizacion_usd > 1.0:
-                new_data = {
-                    'materia_prima_id': -1, # ID -1 para MP Temporal/Nueva
-                    'nombre': mp_nombre,
-                    'unidad': unidad,
-                    'cantidad_base': cantidad_base,
-                    'precio_unitario': precio_unitario_usd,
-                    'cotizacion_usd': cotizacion_usd
-                }
-                st.session_state.ingredientes_temporales.append(new_data)
-                st.success(f"MP '{mp_nombre}' (Nueva) agregada a la simulación.")
+        if submitted_nueva:
+            if mp_nombre_nuevo and cantidad_base_n > 0 and precio_unitario_usd_n > 0:
+                st.session_state.ingredientes_temporales.append({
+                    'materia_prima_id': -1, # ID -1 para nuevas temporales
+                    'nombre': mp_nombre_nuevo,
+                    'unidad': unidad_n,
+                    'cantidad_base': cantidad_base_n,
+                    'precio_unitario': precio_unitario_usd_n,
+                    'cotizacion_usd': cotizacion_usd_n 
+                })
+                st.success(f"Materia Prima '{mp_nombre_nuevo}' agregada temporalmente a la simulación.")
                 st.rerun()
             else:
                 st.warning("Debe ingresar un nombre de MP, cantidad base y precio/cotización válidos.")
 
+    # --------------------------------------------------------------------------------------
     # B. AÑADIR MATERIA PRIMA EXISTENTE EN DB
-    with col_mp_existente.form("form_mp_existente_simulacion"): # << CORRECTO: Abre el formulario en la columna >>
-        st.markdown("**Añadir/Actualizar Materia Prima (Existente en DB)**")
+    # --------------------------------------------------------------------------------------
+    with col_mp_existente.form("form_mp_existente_simulacion"):
+        col_mp_existente.markdown("**Añadir/Actualizar Materia Prima (Existente en DB)**")
         mp_existentes = obtener_todas_materias_primas(conn)
         mp_map = {m['nombre']: m for m in mp_existentes}
         mp_nombres = ["--- Seleccionar MP Existente ---"] + [m['nombre'] for m in mp_existentes]
         
-        # << CORREGIDO: Usar st.selectbox() >>
-        mp_nombre_existente = st.selectbox("Materia Prima Existente:", mp_nombres, key="mp_existente_nombre")
-        
+        mp_nombre_existente = col_mp_existente.selectbox("Materia Prima Existente:", mp_nombres, key="mp_existente_nombre")
         mp_id_seleccionada = None
         mp_info = None
+
         if mp_nombre_existente != "--- Seleccionar MP Existente ---":
             mp_info = mp_map[mp_nombre_existente]
             mp_id_seleccionada = mp_info['id']
@@ -1189,122 +1249,101 @@ def main():
                 ingrediente_base = next((i for i in ingredientes_receta if i['materia_prima_id'] == mp_id_seleccionada), None)
                 if ingrediente_base:
                     cantidad_base_actual = ingrediente_base['cantidad']
-
-            # << CORREGIDO: Usar st.columns() >>
-            col_cant_e, col_unidad_e = st.columns([0.6, 0.4])
-            cantidad_base_e = col_cant_e.number_input(
-                f"Cantidad Base ({BASE_LITROS:.0f}L) (Actual: {cantidad_base_actual:.4f}):", 
-                min_value=0.0, 
-                value=cantidad_base_actual, 
-                step=0.01, 
-                format="%.4f", 
-                key="mp_existente_cantidad"
-            )
+            
+            col_cant_e, col_unidad_e = col_mp_existente.columns([0.6, 0.4])
+            cantidad_base_e = col_cant_e.number_input(f"Cantidad Base ({BASE_LITROS:.0f}L) (Actual: {cantidad_base_actual:.4f}):", min_value=0.0, value=cantidad_base_actual, step=0.01, format="%.4f", key="mp_existente_cantidad")
             col_unidad_e.text_input("Unidad:", value=mp_info['unidad'] if mp_info else "", disabled=True, key="mp_existente_unidad")
             
-            # << CORREGIDO: Usar st.columns() >>
-            col_precio_e, col_cot_e = st.columns(2) 
+            col_precio_e, col_cot_e = col_mp_existente.columns(2)
             precio_unitario_usd_e = col_precio_e.number_input("Precio Manual (USD):", min_value=0.0, value=0.0, step=0.01, format="%.4f", key="mp_existente_precio_usd")
-            cotizacion_usd_e = col_cot_e.number_input("Cotización Manual (ARS/USD):", min_value=1.0, value=1.0, step=1.0, format="%.2f", key="mp_existente_cotizacion_usd")
-        
-        # << CORREGIDO: Usar st.form_submit_button() >>
-        submitted_mp_existente = st.form_submit_button("Actualizar/Agregar a Simulación")
+            cotizacion_usd_e = col_cot_e.number_input("Cotización USD de Compra/Referencia:", min_value=1.0, value=cotizacion_dolar_actual, step=1.0, format="%.2f", key="mp_existente_cotizacion_usd")
+            
+            submitted_existente = st.form_submit_button("Aplicar Actualización Temporal")
 
-        if submitted_mp_existente:
-            if mp_id_seleccionada and (cantidad_base_e > 0 or precio_unitario_usd_e > 0):
-                new_data = {
-                    'materia_prima_id': mp_id_seleccionada,
-                    'nombre': mp_info['nombre'],
-                    'unidad': mp_info['unidad'],
-                    'cantidad_base': cantidad_base_e,
-                    'precio_unitario': precio_unitario_usd_e,
-                    'cotizacion_usd': cotizacion_usd_e
-                }
-                
-                # Para evitar duplicados: si ya existe en temporales, la eliminamos antes de añadir
-                st.session_state.ingredientes_temporales = [
-                    item for item in st.session_state.ingredientes_temporales 
-                    if item['materia_prima_id'] != mp_id_seleccionada
-                ]
-                
-                # Si se modifica la cantidad o el precio (o cotización), se añade a temporales
-                # La lógica de "is_modified" se maneja en el data_editor, aquí solo agregamos si se hizo submit.
-                st.session_state.ingredientes_temporales.append(new_data)
-                st.success(f"MP '{mp_info['nombre']}' (Existente) agregada/actualizada en la simulación.")
-
-                st.rerun()
-
-            else:
-                st.warning("Debe seleccionar una MP y/o las cantidades/precios deben ser mayores a cero.")
-
-
-    st.markdown("---")
-    
-    # Botón de limpieza global
-    if st.button("🗑️ Limpiar TODOS los Cambios Manuales (MP y Gastos) y Recargar Receta Base"):
-        st.session_state.ingredientes_temporales = []
-        st.session_state.gastos_temporales_simulacion = []
-        st.session_state.gasto_fijo_mensual_total = 0.0
-        st.session_state.litros = BASE_LITROS
-        st.rerun()
+            if submitted_existente:
+                if cantidad_base_e > 0 or precio_unitario_usd_e > 0:
+                    # Sobreescribir o agregar la MP existente a la lista temporal
+                    # Primero, eliminar cualquier entrada anterior para esta MP_ID
+                    st.session_state.ingredientes_temporales = [
+                        item for item in st.session_state.ingredientes_temporales 
+                        if item.get('materia_prima_id') != mp_id_seleccionada
+                    ]
+                    
+                    # Luego agregar la nueva entrada
+                    st.session_state.ingredientes_temporales.append({
+                        'materia_prima_id': mp_id_seleccionada,
+                        'nombre': mp_nombre_existente,
+                        'unidad': mp_info['unidad'],
+                        'cantidad_base': cantidad_base_e,
+                        'precio_unitario': precio_unitario_usd_e,
+                        'cotizacion_usd': cotizacion_usd_e 
+                    })
+                    st.success(f"Materia Prima '{mp_nombre_existente}' actualizada temporalmente.")
+                    st.rerun()
+                else:
+                    st.warning("Debe ingresar una cantidad base o un precio manual válidos.")
+        else:
+            st.form_submit_button("Aplicar Actualización Temporal", disabled=True)
+            
+    # --------------------------------------------------------------------------------------
+    # C. LIMPIAR SIMULACIÓN
+    # --------------------------------------------------------------------------------------
+    with col_limpiar.container():
+        st.markdown("**Limpieza de Simulación**")
+        if st.button("🗑️ Limpiar Valores Manuales (MP y Gastos) y Recargar Receta Base"):
+            st.session_state.ingredientes_temporales = []
+            st.session_state.gastos_temporales_simulacion = []
+            st.session_state.gasto_fijo_mensual_total = 0.0
+            st.session_state.litros = BASE_LITROS
+            st.rerun()
 
     # =================================================================================================
     # PRESUPUESTO ACUMULADO
     # =================================================================================================
     col_agregar, col_margen = st.columns([0.6, 0.4])
-
     if receta_id_seleccionada and costo_total_final > 0:
         # --------------------------------------------------------------------------------------
         # 1. FORMULARIO PARA AGREGAR AL PRESUPUESTO
         # --------------------------------------------------------------------------------------
         with col_agregar.form("form_agregar_presupuesto"):
-            st.subheader("Añadir Simulación al Presupuesto")
-            col_tanda, col_litros_total = st.columns(2)
-            
+            col_agregar.subheader("Añadir Simulación al Presupuesto")
+            col_tanda, col_litros_total = col_agregar.columns(2)
             cantidad_a_agregar = col_tanda.number_input(
-                f"Número de Tandas de {cantidad_litros:.2f}L:", 
-                min_value=1, 
-                value=1, 
-                step=1, 
-                key="cantidad_tandas"
+                f"Número de Tandas de {cantidad_litros:.2f}L:", min_value=1, value=1, step=1, key="cantidad_tandas"
             )
+            # --- [MODIFICACIÓN CLAVE: INGRESO MANUAL DEL PRECIO DE VENTA] ---
+            costo_final_tandas = costo_total_final * cantidad_a_agregar
             
-            margen_ganancia_inicial = col_margen.number_input(
-                "Margen de Ganancia Inicial (%):", 
-                min_value=0.0, 
-                value=30.0, 
-                step=1.0, 
-                key="margen_ganancia_inicial"
+            precio_venta_total_ars_manual = col_margen.number_input(
+                "Precio de Venta Total Manual (ARS):", 
+                min_value=costo_final_tandas, # El precio mínimo es el costo total
+                value=costo_final_tandas * 1.30, # Sugerencia inicial (30% margen)
+                step=100.0, 
+                format="%.2f",
+                key="precio_venta_total_ars_manual"
             )
             
             total_litros = cantidad_litros * cantidad_a_agregar
             col_litros_total.metric("Volumen Total a Presupuestar", f"{total_litros:,.2f} Litros")
             
-            costo_final_tandas = costo_total_final * cantidad_a_agregar
-            precio_venta_total_ars = costo_final_tandas * (1 + margen_ganancia_inicial / 100)
+            precio_venta_total_ars = precio_venta_total_ars_manual
             precio_venta_total_usd = precio_venta_total_ars / cotizacion_dolar_actual
             
-            # Cálculo del Precio Unitario por Envase (para inicializar el campo de edición)
-            unidades_totales_agregadas = unidades_necesarias * cantidad_a_agregar
-            precio_venta_unitario_manual_ars_inicial = precio_venta_total_ars / unidades_totales_agregadas if unidades_totales_agregadas > 0 else 0.0
+            # Calcular el margen de ganancia real para mostrarlo y guardarlo
+            margen_ganancia_calculado = ((precio_venta_total_ars - costo_final_tandas) / costo_final_tandas) * 100 if costo_final_tandas > 0 else 0.0
 
-            st.markdown(f"**Costo Total (ARS):** ${costo_final_tandas:,.2f}")
+            st.markdown(f"**Costo Total de Producción (ARS):** ${costo_final_tandas:,.2f}")
+            st.markdown(f"**Margen de Ganancia Calculado:** **{margen_ganancia_calculado:,.2f}%**")
             st.markdown(f"**Precio de Venta Total (ARS):** ${precio_venta_total_ars:,.2f}")
-            st.markdown(f"**Precio Unitario por Envase (ARS):** ${precio_venta_unitario_manual_ars_inicial:,.2f}")
-            
+            st.markdown(f"**Precio de Venta Total (USD):** USD ${precio_venta_total_usd:,.2f}")
+
             if st.form_submit_button("➕ Agregar al Presupuesto"):
                 # Asignar un ID único (temporalmente, solo incremental en la sesión)
                 next_id = len(st.session_state['simulaciones_presupuesto']) + 1
                 
-                # --- Preparar el JSON de Envase ---
-                envase_info = {
-                    'Envase_ID': envase_id_actual,
-                    'Envase_Nombre': envase_seleccionado_nombre,
-                    'Capacidad_Litros': capacidad_litros,
-                    # Se usa el total de unidades calculadas
-                    'Unidades_Envase_Total': unidades_totales_agregadas 
-                }
-
+                # Almacenar el margen calculado
+                margen_ganancia_final = margen_ganancia_calculado
+                
                 # Crear la data de simulación
                 simulacion_data = {
                     'ID': next_id,
@@ -1312,280 +1351,179 @@ def main():
                     'litros': total_litros,
                     'costo_total_ars': costo_final_tandas,
                     'costo_por_litro_ars': costo_por_litro_ars,
-                    'gasto_indirecto_total_ars': costo_indirecto_total_ars * cantidad_a_agregar,
+                    'gasto_indirecto_tanda': gasto_indirecto_tanda * cantidad_a_agregar,
                     'costo_flete_total_ars': costo_flete_total_ars * cantidad_a_agregar,
-                    'costo_total_empaque_ars': costo_total_empaque_ars * cantidad_a_agregar, # Total Empaque de la Tanda
-                    'margen_ganancia': margen_ganancia_inicial, # Margen inicial
-                    'precio_venta_total_ars': precio_venta_total_ars,
+                    'costo_envase_total_ars': costo_total_empaque_ars * cantidad_a_agregar, # Usar costo_total_empaque_ars
+                    'costo_mp_total_ars': costo_mp_total * cantidad_a_agregar,
+                    'costo_total_mp_usd': costo_total_mp_usd * cantidad_a_agregar,
+                    'cantidad_tandas': cantidad_a_agregar,
+                    'margen_ganancia': margen_ganancia_final, # Se guarda el margen calculado
+                    'precio_venta_total_ars': precio_venta_total_ars, # Se guarda el precio manual
                     'precio_venta_total_usd': precio_venta_total_usd,
-                    'precio_venta_unitario_manual_ars': precio_venta_unitario_manual_ars_inicial, # Nuevo campo para edición
-                    'cantidad_tandas': cantidad_a_agregar, 
-                    # --- CORRECCIÓN CLAVE: Asegurar que se guarda el JSON ---
-                    'envase_info_json': json.dumps(envase_info)
+                    'envase_info_json': json.dumps({
+                        'Envase_Nombre': envase_seleccionado_nombre_final, # Usar el nombre final determinado
+                        'Capacidad_Litros': capacidad_litros, # <<< INCLUYE LA CAPACIDAD
+                        'Unidades_Envase_Total': unidades_necesarias * cantidad_a_agregar,
+                        'Precio_Envase_Unitario_ARS': precio_envase_unitario_ars,
+                    })
                 }
-                
                 st.session_state['simulaciones_presupuesto'].append(simulacion_data)
-                st.success(f"Simulación de {receta_seleccionada_nombre} agregada al presupuesto.")
-                st.rerun()
-
-    # --------------------------------------------------------------------------------------
-    # 2. EDITOR DE PRESUPUESTO ACUMULADO (CORRECCIÓN KEYERROR)
-    # --------------------------------------------------------------------------------------
+                st.success(f"Simulación '{receta_seleccionada_nombre}' añadida al presupuesto con un precio de venta de ${precio_venta_total_ars:,.2f} ARS.")
+    
     st.markdown("---")
-    st.header("📋 Presupuesto Acumulado")
 
-    # Asignar cotización para usarla en el cálculo de la edición
-    cotizacion_dolar_actual = st.session_state.get('dolar', 1.0) 
-
+    # --------------------------------------------------------------------------------------
+    # 2. VISUALIZACIÓN Y EDICIÓN DEL PRESUPUESTO ACUMULADO
+    # --------------------------------------------------------------------------------------
     if st.session_state['simulaciones_presupuesto']:
-        # 1. Crear DataFrame para manipulación/display con las claves originales (minúsculas)
-        df_presupuesto_raw = pd.DataFrame(st.session_state['simulaciones_presupuesto'])
-        df_presupuesto_raw['Eliminar'] = False # Columna para control de eliminación
+        st.subheader("Presupuesto Acumulado (Edición)")
         
-        # --- INICIO CORRECCIÓN KEYERROR 'envase_info_json' ---
-        df_presupuesto = df_presupuesto_raw.copy()
+        # 1. Crear el DataFrame para la edición
+        df_presupuesto = pd.DataFrame(st.session_state['simulaciones_presupuesto'])
         
-        if 'envase_info_json' in df_presupuesto_raw.columns:
-            # Desglosar los JSON de envase de manera robusta
-            df_envase_info = df_presupuesto_raw['envase_info_json'].apply(
-                # Manejar NaN/None y asegurar que sea string antes de json.loads
-                lambda x: json.loads(x) if pd.notnull(x) and isinstance(x, str) else {}
-            ).apply(pd.Series)
+        # --- [FIX para KeyError: 'precio_venta_total_ars'] ---
+        # Manejar datos antiguos de la sesión
+        if 'precio_venta_total_ars' not in df_presupuesto.columns:
+            df_presupuesto['precio_venta_total_ars'] = df_presupuesto['costo_total_ars'] * 1.30 
             
-            # Unir las columnas de envase (después de eliminar la columna JSON original)
-            df_presupuesto = pd.concat([df_presupuesto_raw.drop(columns=['envase_info_json']), df_envase_info], axis=1)
-        
-        # Asegurar que las columnas de display existan, incluso si los datos son antiguos
-        df_presupuesto['Envase'] = df_presupuesto.get('Envase_Nombre', df_presupuesto.get('Envase', 'N/A'))
-        df_presupuesto['Unidades_Envase_Total'] = df_presupuesto.get('Unidades_Envase_Total', 0)
-        df_presupuesto['Receta'] = df_presupuesto.get('nombre_receta', df_presupuesto.get('Receta', 'N/A'))
-        
-        # 2. Mapeo de columnas internas a nombres de visualización/edición
-        column_mapping = {
-            'ID': 'ID',
-            'Receta': 'Receta',
-            'litros': 'Litros', 
-            'costo_total_ars': 'Costo_Total_ARS',
-            'margen_ganancia': 'Margen_Ganancia',
-            'precio_venta_total_ars': 'Precio_Venta_Total_ARS',
-            'precio_venta_unitario_manual_ars': 'Precio_Unitario_Envase_ARS',
-            'Unidades_Envase_Total': 'Unidades_Envase_Total', 
-            'Envase': 'Envase', 
-            'Eliminar': 'Eliminar'
-        }
-        
-        # Asegurar que solo se seleccionen columnas que existen
-        cols_to_select = [col for col in column_mapping.keys() if col in df_presupuesto.columns]
-        filtered_column_mapping = {k: v for k, v in column_mapping.items() if k in cols_to_select}
-
-        # Crear un nuevo DataFrame para el editor
-        df_display_editor = df_presupuesto[cols_to_select].rename(columns=filtered_column_mapping)
-        
-        # 3. Definir el orden de las columnas a mostrar
-        column_order_presupuesto = [
-            "ID", "Receta", "Litros", "Envase", "Costo_Total_ARS", 
-            "Precio_Unitario_Envase_ARS", "Margen_Ganancia", "Precio_Venta_Total_ARS", "Eliminar"
-        ]
-        
-        # Filtrar el DataFrame para solo incluir las columnas que deben mostrarse en el editor
-        df_display_editor = df_display_editor[[c for c in column_order_presupuesto if c in df_display_editor.columns]].copy() 
-
-        col_config_presupuesto = {
-            "ID": st.column_config.TextColumn("ID", disabled=True),
-            "Receta": st.column_config.TextColumn("Receta", disabled=True),
-            "Litros": st.column_config.NumberColumn("Litros", format="%.2f L", disabled=True),
-            "Envase": st.column_config.TextColumn("Envase", disabled=True),
-            "Costo_Total_ARS": st.column_config.NumberColumn("Costo Total (ARS)", format="$ %.2f", disabled=True, help="Costo de Producción (MP + Flete + Overhead + Empaque)"),
+        if 'precio_venta_total_usd' not in df_presupuesto.columns:
+            df_presupuesto['precio_venta_total_usd'] = df_presupuesto['precio_venta_total_ars'] / cotizacion_dolar_actual
             
-            "Precio_Unitario_Envase_ARS": st.column_config.NumberColumn(
-                "Precio Unitario (ARS/u.)",
-                min_value=0.0,
-                step=1.0,
-                format="$ %.2f",
-                help="Precio de Venta por unidad de envase. Edite para recalcular el total."
+        if 'margen_ganancia' not in df_presupuesto.columns:
+            costo = df_presupuesto['costo_total_ars']
+            venta = df_presupuesto['precio_venta_total_ars']
+            df_presupuesto['margen_ganancia'] = ((venta - costo) / costo) * 100
+        # --- [FIN FIX para KeyError: 'precio_venta_total_ars'] ---
+        
+        # Se asegura que la columna de precio de venta esté correctamente calculada para la visualización inicial
+        df_presupuesto['Precio_Venta_ARS'] = df_presupuesto['precio_venta_total_ars']
+        df_presupuesto['Precio_Venta_USD'] = df_presupuesto['precio_venta_total_usd']
+        
+        # <<< CORRECCIÓN CLAVE para KeyError: 'Eliminar' >>>
+        # Inicializar la columna 'Eliminar' antes de seleccionarla para la vista
+        df_presupuesto['Eliminar'] = False 
+        
+        column_config_presupuesto = {
+            'ID': st.column_config.NumberColumn(disabled=True),
+            'nombre_receta': st.column_config.TextColumn("Receta", disabled=True),
+            'litros': st.column_config.NumberColumn("Litros", format="%.2f L", disabled=True),
+            'costo_total_ars': st.column_config.NumberColumn("Costo Total (ARS)", format="$%.2f", disabled=True, help="Costo de Producción."),
+            'cantidad_tandas': st.column_config.NumberColumn("Tandas", disabled=True),
+            # [MODIFICACIÓN CLAVE: HABILITAR EDICIÓN DE PRECIO]
+            'Precio_Venta_ARS': st.column_config.NumberColumn(
+                "Precio Venta Total (ARS)", 
+                format="$%.2f", 
+                help="Haga doble clic para editar el Precio de Venta (ARS)."
             ),
-            
-            "Margen_Ganancia": st.column_config.NumberColumn("Margen (%)", format="%.2f %%", disabled=True, help="Margen calculado en base al Precio Unitario Manual."), 
-            
-            "Precio_Venta_Total_ARS": st.column_config.NumberColumn("Venta Total (ARS)", format="$ %.2f", disabled=True),
-            "Eliminar": st.column_config.CheckboxColumn("Eliminar", default=False),
+            # [MODIFICACIÓN CLAVE: MARGEN DE SÓLO LECTURA]
+            'margen_ganancia': st.column_config.NumberColumn("Margen de Ganancia (%)", format="%.2f", disabled=True, help="Margen calculado automáticamente."),
+            'Precio_Venta_USD': st.column_config.NumberColumn("Venta Total (USD)", format="$%.2f", disabled=True),
+            'Eliminar': st.column_config.CheckboxColumn("Eliminar", default=False)
         }
 
-        # 4. Pasar el DataFrame limpio al editor
+        # Mostrar solo las columnas relevantes para la edición/visualización, incluyendo el margen y el precio editable
+        df_display_presupuesto = df_presupuesto[[ 
+            'ID', 'nombre_receta', 'litros', 'costo_total_ars', 'cantidad_tandas', 
+            'Precio_Venta_ARS', 
+            'margen_ganancia', 
+            'Precio_Venta_USD', 'Eliminar' 
+        ]].copy()
+        
         edited_presupuesto_df = st.data_editor(
-            df_display_editor,
-            column_config=col_config_presupuesto,
-            # Solo se permite editar el Precio Unitario y la casilla Eliminar
-            disabled=[c for c in df_display_editor.columns if c not in ["Precio_Unitario_Envase_ARS", "Eliminar"]], 
-            hide_index=True,
+            df_display_presupuesto,
+            column_config=column_config_presupuesto,
             use_container_width=True,
-            key="presupuesto_editor",
+            hide_index=True,
+            # Asegurarse que el orden de columnas incluye el precio editable
+            column_order=[ 'ID', 'nombre_receta', 'litros', 'costo_total_ars', 'cantidad_tandas', 
+                           'Precio_Venta_ARS', 'margen_ganancia', 'Precio_Venta_USD', 'Eliminar' ],
+            key="editor_presupuesto_final"
         )
-
-        if edited_presupuesto_df is not None:
-            # 5. Procesar los cambios después de la edición
-            nuevas_simulaciones = []
-            cambios_detectados = False
-            
-            # Usar df_presupuesto (el DataFrame unificado y limpio) como fuente de datos base
-            # Se usa el ID como índice
-            if 'ID' in df_presupuesto.columns:
-                 df_full_original = df_presupuesto.set_index('ID')
-            else:
-                 df_full_original = df_presupuesto.copy()
-            
-            for index, row in edited_presupuesto_df.iterrows():
-                if not row['Eliminar']:
-                    
-                    try:
-                        # Obtener la simulación original (con las claves de Session State)
-                        original_sim_series = df_full_original.loc[row['ID']]
-                    except KeyError:
-                        continue
-                        
-                    # Convertir a dict para fácil manipulación, manteniendo la estructura original
-                    original_sim = original_sim_series.to_dict()
-                    
-                    # Obtener datos auxiliares (Unidades de Envase y Costo)
-                    unidades_envase_total = original_sim.get('Unidades_Envase_Total', 0)
-                    costo_total_ars = original_sim.get('costo_total_ars', 0.0) # Usar nombre de la fuente (minúsculas)
-                    
-                    # 1. Obtener el precio unitario editado (desde el nombre de visualización)
-                    precio_unitario_editado_ars = row['Precio_Unitario_Envase_ARS']
-                    
-                    # 2. Recalcular el precio de venta total con el nuevo precio unitario
-                    precio_venta_total_ars_calc = precio_unitario_editado_ars * unidades_envase_total
-                    
-                    # 3. Recalcular el margen y el precio USD
-                    if costo_total_ars > 0:
-                        margen_ganancia_calculado = ((precio_venta_total_ars_calc / costo_total_ars) - 1) * 100
-                    else:
-                        margen_ganancia_calculado = 0.0
-                        
-                    precio_venta_total_usd_calc = precio_venta_total_ars_calc / cotizacion_dolar_actual if cotizacion_dolar_actual > 0 else 0.0
-                    
-                    # 4. Verificar si hubo cambios en el precio unitario (para evitar re-run innecesario)
-                    original_precio_unitario = original_sim.get('precio_venta_unitario_manual_ars', 0.0)
-                    original_margen = original_sim.get('margen_ganancia', 0.0)
-                    
-                    if (original_precio_unitario != precio_unitario_editado_ars or 
-                        abs(original_margen - margen_ganancia_calculado) > 0.01):
-                        cambios_detectados = True
-                    
-                    # 5. Actualizar el diccionario de la simulación con los nuevos valores (usando las claves del session state en minúsculas)
-                    original_sim['precio_venta_unitario_manual_ars'] = precio_unitario_editado_ars
-                    original_sim['precio_venta_total_ars'] = precio_venta_total_ars_calc
-                    original_sim['precio_venta_total_usd'] = precio_venta_total_usd_calc
-                    original_sim['margen_ganancia'] = margen_ganancia_calculado
-                    
-                    # 6. Limpiar el diccionario de las columnas auxiliares (Envase, Unidades_Envase_Total, etc.) que NO deben ir en el session state de simulaciones
-                    # Se mantiene solo la estructura de guardado original + el JSON que se reconstruye
-                    
-                    # Se toma la data limpia de df_presupuesto_raw original (si existe) y se actualizan los campos
-                    simulacion_reconstruida = df_presupuesto_raw.loc[df_presupuesto_raw['ID'] == row['ID']].iloc[0].to_dict()
-                    
-                    simulacion_reconstruida['precio_venta_unitario_manual_ars'] = precio_unitario_editado_ars
-                    simulacion_reconstruida['precio_venta_total_ars'] = precio_venta_total_ars_calc
-                    simulacion_reconstruida['precio_venta_total_usd'] = precio_venta_total_usd_calc
-                    simulacion_reconstruida['margen_ganancia'] = margen_ganancia_calculado
-                    
-                    # Eliminar la columna 'Eliminar' antes de guardar
-                    if 'Eliminar' in simulacion_reconstruida:
-                        del simulacion_reconstruida['Eliminar']
-                    
-                    nuevas_simulaciones.append(simulacion_reconstruida)
-                else:
-                    cambios_detectados = True # Detectar eliminación
-
-            # 6. Actualizar el Session State si hubo cambios o eliminaciones
-            if cambios_detectados:
-                st.session_state['simulaciones_presupuesto'] = nuevas_simulaciones
+        
+        # Reconstruir la lista de simulaciones aplicando los cambios (Precio Venta ARS y eliminación)
+        nuevas_simulaciones = []
+        for index, row in edited_presupuesto_df.iterrows():
+            if not row['Eliminar']:
+                # Buscar la simulación original por ID
+                original_sim = df_presupuesto[df_presupuesto['ID'] == row['ID']].iloc[0].to_dict()
                 
-                # 7. Botón para aplicar el cambio y forzar el re-render
-                if st.button("Actualizar Presupuesto (Aplicar Eliminados/Precio Unitario)"):
-                    st.rerun()
-            else:
-                 st.info("No se detectaron cambios en los precios unitarios o eliminaciones. Edite la tabla y presione 'Actualizar Presupuesto' para guardar.")
-
-    else:
-        st.info("El presupuesto acumulado está vacío.")
-
-    # --------------------------------------------------------------------------------------
-    # 3. RESUMEN FINAL Y GUARDADO
-    # --------------------------------------------------------------------------------------
-    st.markdown("---")
-    st.subheader("Guardar y Generar Presupuesto Final")
-    
-    # Volver a cargar el DataFrame final después de la edición/eliminación
-    df_final = pd.DataFrame(st.session_state['simulaciones_presupuesto'])
-    
-    if not df_final.empty:
-        
-        # --- INICIO CORRECCIÓN KEYERROR 'envase_info_json' (Bloque de Guardado) ---
-        df_final_procesado = df_final.copy()
-        
-        if 'envase_info_json' in df_final.columns:
-            # Desglosar los JSON de envase de manera robusta
-            df_envase_info = df_final['envase_info_json'].apply(
-                lambda x: json.loads(x) if pd.notnull(x) and isinstance(x, str) else {}
-            ).apply(pd.Series)
-            
-            # Unir las columnas de envase. Se usará df_final_procesado
-            # Se eliminan los JSON originales del proceso para no duplicar data al concatenar
-            df_final_procesado = pd.concat([df_final.drop(columns=['envase_info_json'], errors='ignore'), df_envase_info], axis=1)
-        
-        # Asegurar que las columnas de display existan
-        df_final_procesado['Envase_Nombre'] = df_final_procesado.get('Envase_Nombre', 'N/A')
-        df_final_procesado['Unidades_Envase_Total'] = df_final_procesado.get('Unidades_Envase_Total', 0)
-        # --- FIN CORRECCIÓN ---
-        
-        litros_total_acumulado = df_final_procesado['litros'].sum()
-        costo_total_acumulado = df_final_procesado['costo_total_ars'].sum()
-        precio_final_ars_total = df_final_procesado['precio_venta_total_ars'].sum()
-        precio_final_usd_total = precio_final_ars_total / cotizacion_dolar_actual if cotizacion_dolar_actual > 0 else 0.0
-
-        st.metric("Volumen Total Presupuestado (L)", f"{litros_total_acumulado:,.2f} Litros")
-        st.metric("Costo Total de Producción (ARS)", f"${costo_total_acumulado:,.2f}")
-        st.metric("Precio Venta Final (ARS)", f"${precio_final_ars_total:,.2f}")
-        st.metric("Precio Venta Final (USD)", f"USD ${precio_final_usd_total:,.2f}")
-        
-        # Cálculo del precio promedio por litro
-        precio_unitario_ars_litro_AVG = precio_final_ars_total / litros_total_acumulado if litros_total_acumulado > 0 else 0.0
-        st.metric("Precio Promedio por Litro (ARS/L)", f"${precio_unitario_ars_litro_AVG:,.2f}")
-        
+                # Obtener el costo total original (no editable)
+                costo_total_ars = original_sim['costo_total_ars']
+                
+                # [MODIFICACIÓN CLAVE] Aplicar el nuevo precio de venta manual editado
+                nuevo_precio_venta_ars = row['Precio_Venta_ARS']
+                
+                # 1. Actualizar el precio de venta ARS
+                original_sim['precio_venta_total_ars'] = nuevo_precio_venta_ars
+                
+                # 2. Recalcular el margen de ganancia
+                nuevo_margen_ganancia = ((nuevo_precio_venta_ars - costo_total_ars) / costo_total_ars) * 100 if costo_total_ars > 0 else 0.0
+                original_sim['margen_ganancia'] = nuevo_margen_ganancia
+                
+                # 3. Recalcular el precio de venta USD
+                original_sim['precio_venta_total_usd'] = nuevo_precio_venta_ars / cotizacion_dolar_actual
+                
+                nuevas_simulaciones.append(original_sim)
+                
+        st.session_state['simulaciones_presupuesto'] = nuevas_simulaciones
         st.markdown("---")
+        if st.button("Actualizar Presupuesto (Aplicar Eliminados/Margen)"):
+            st.rerun()
+
+        # --------------------------------------------------------------------------------------
+        # 3. RESUMEN FINAL Y GUARDADO
+        # --------------------------------------------------------------------------------------
+        # Volver a cargar el DataFrame final después de la edición/eliminación
+        df_final = pd.DataFrame(st.session_state['simulaciones_presupuesto'])
         
-        # Formulario para guardar y generar PDF
-        with st.form("form_guardar_presupuesto"):
-            cliente_nombre = st.text_input("Nombre del Cliente:", key="cliente_nombre_presupuesto", help="Requerido para guardar el presupuesto.")
-            submitted_guardar = st.form_submit_button("💾 Guardar y Generar PDF")
+        if not df_final.empty:
+            st.subheader("Resumen Final del Presupuesto")
+            litros_total_acumulado = df_final['litros'].sum()
+            costo_total_acumulado = df_final['costo_total_ars'].sum()
+            precio_final_ars_total = df_final['precio_venta_total_ars'].sum()
+            precio_final_usd_total = precio_final_ars_total / cotizacion_dolar_actual
+
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric("Litros Totales", f"{litros_total_acumulado:,.2f} L")
+            col_b.metric("Costo Total (ARS)", f"${costo_total_acumulado:,.2f}")
+            col_c.metric("Precio Final (ARS)", f"${precio_final_ars_total:,.2f}")
+            col_c.metric("Precio Final (USD)", f"USD ${precio_final_usd_total:,.2f}")
+
+            # --------------------------------------------------------------------------------------
+            # 4. GUARDADO DE PRESUPUESTO
+            # --------------------------------------------------------------------------------------
+            st.markdown("---")
+            st.subheader("Guardar y Exportar Presupuesto")
             
-            if submitted_guardar:
-                if cliente_nombre:
+            cliente_nombre = st.text_input("Nombre del Cliente para guardar:", key="cliente_nombre_final")
+            
+            if st.button("💾 Guardar Presupuesto Final y Generar PDF"):
+                if not cliente_nombre:
+                    st.error("Por favor, ingrese un nombre de cliente.")
+                else:
                     # 1. Obtener o crear ID del cliente
                     cliente_id = get_or_create_client(conn, cliente_nombre)
-                    
-                    # 2. Preparar detalle_simulaciones_json (usando el DataFrame ORIGINAL df_final, ya que contiene el JSON)
-                    
-                    # Se requiere que el DF de guardado contenga todas las claves.
-                    # Se añaden a df_final_procesado (el que ya tiene las columnas de display separadas) las claves de origen (nombre_receta, precio_venta_total_usd, etc)
-                    
-                    # Seleccionar solo las columnas que son parte de la simulación original
-                    df_detalle_guardado = df_final[[
-                        'ID', 'nombre_receta', 'litros', 'costo_total_ars', 
-                        'costo_por_litro_ars', 'gasto_indirecto_total_ars', 
-                        'costo_flete_total_ars', 'costo_total_empaque_ars', 
-                        'margen_ganancia', 'precio_venta_total_ars', 'precio_venta_total_usd',
-                        'precio_venta_unitario_manual_ars',
-                        'cantidad_tandas', 'envase_info_json' # Se incluye el JSON para guardar el detalle completo
-                    ]].copy()
 
-                    # El JSON debe ser una lista de diccionarios (orient='records')
-                    detalle_simulaciones_json = df_detalle_guardado.to_json(orient='records') 
+                    # Desglosar los JSON de envase para obtener Envase_Nombre, Unidades_Envase_Total y Capacidad_Litros
+                    df_envase_info = df_final['envase_info_json'].apply(json.loads).apply(pd.Series)
+                    # CORRECCIÓN DE ERROR: Agregar .reset_index(drop=True) para evitar 'ValueError: cannot reindex on an axis with duplicate...'
+                    df_envase_info = df_envase_info.reset_index(drop=True)
+                    df_final_clean = df_final.reset_index(drop=True)
+                    
+                    df_detalle_guardado = pd.concat([
+                        df_final_clean[['nombre_receta', 'litros', 'precio_venta_total_ars', 'precio_venta_total_usd']].rename(columns={'nombre_receta': 'Receta', 'precio_venta_total_ars': 'Precio_Venta_Total_ARS', 'precio_venta_total_usd': 'Precio_Venta_Total_USD'}),
+                        df_envase_info[['Envase_Nombre', 'Unidades_Envase_Total', 'Capacidad_Litros']] # <<< CORRECCIÓN: SE INCLUYE Capacidad_Litros
+                    ], axis=1)
+                    
+                    # CORRECCIÓN DE ERROR: renombrar 'litros' para que coincida con el nombre en el JSON y la impresión
+                    df_detalle_guardado.rename(columns={'litros': 'Litros'}, inplace=True) 
 
+                    # Crear el JSON final del detalle usando los datos ya desglosados
+                    detalle_simulaciones_json = df_detalle_guardado.to_json(orient='records')
+                    
                     # 3. Calcular el margen de ganancia promedio para el registro principal
                     margen_ganancia_promedio = ((precio_final_ars_total - costo_total_acumulado) / costo_total_acumulado) * 100 if costo_total_acumulado > 0 else 0.0
-                    
+
                     # 4. Guardar el presupuesto
                     presupuesto_id = save_presupuesto(
                         conn, 
@@ -1598,68 +1536,58 @@ def main():
                     )
                     st.success(f"✅ Presupuesto N° {presupuesto_id} guardado con éxito para {cliente_nombre}!")
 
-                    # 5. Prepara los datos para generar el PDF (usando df_final_procesado que tiene las columnas de envase separadas)
+                    # 5. Prepara los datos para generar el PDF
+                    # El DataFrame final necesita las columnas Envase_Nombre y Unidades_Envase_Total
+                    df_pdf_data = df_final_clean[['nombre_receta', 'litros', 'precio_venta_total_ars', 'precio_venta_total_usd']].rename(columns={'nombre_receta': 'Receta', 'precio_venta_total_ars': 'Precio_Venta_Total_ARS', 'precio_venta_total_usd': 'Precio_Venta_Total_USD'})
+                    # Asegurar la columna Capacidad_Litros
+                    df_pdf_data = pd.concat([df_pdf_data, df_envase_info], axis=1)
+
+                    # Asegurar el nombre de la columna 'Litros' para el PDF y la vista previa
+                    df_pdf_data.rename(columns={'litros': 'Litros'}, inplace=True) 
+
                     data_pdf = {
-                        'presupuesto_id': presupuesto_id,
                         'cliente_nombre': cliente_nombre,
                         'cotizacion_dolar_actual': cotizacion_dolar_actual,
-                        'precio_unitario_ars_litro': precio_unitario_ars_litro_AVG,
+                        'presupuesto_id': presupuesto_id,
+                        'precio_unitario_ars_litro': precio_final_ars_total / litros_total_acumulado,
                         'precio_final_ars': precio_final_ars_total,
                         'litros_total_acumulado': litros_total_acumulado,
-                        # Crear el DF de detalle para el PDF con las columnas de display
-                        'df_detalle_final_presupuesto': df_final_procesado.rename(columns={
-                            'nombre_receta': 'Receta',
-                            'litros': 'Litros',
-                            'precio_venta_total_ars': 'Precio_Venta_Total_ARS',
-                            'precio_venta_total_usd': 'Precio_Venta_Total_USD',
-                            # Envase_Nombre y Unidades_Envase_Total ya están en mayúsculas en df_final_procesado
-                        })[['Receta', 'Litros', 'Precio_Venta_Total_ARS', 'Precio_Venta_Total_USD', 'Envase_Nombre', 'Unidades_Envase_Total']]
+                        'df_detalle_final_presupuesto': df_pdf_data
                     }
-                    
                     st.session_state['presupuesto_data_for_print'] = data_pdf
                     st.rerun()
 
-                else:
-                    st.warning("Debe ingresar el nombre del cliente para guardar el presupuesto.")
-    else:
-        st.info("Agregue simulaciones al presupuesto para ver el resumen final.")
-        
-
     # --------------------------------------------------------------------------------------
-    # 4. VISTA PREVIA DEL PDF Y DESCARGA
+    # 5. VISTA DE IMPRESIÓN (PDF)
     # --------------------------------------------------------------------------------------
     if st.session_state['presupuesto_data_for_print']:
-        st.markdown("---")
-        st.subheader("Vista Previa y Descarga de Presupuesto")
-        
         data_pdf = st.session_state['presupuesto_data_for_print']
+        st.markdown("---")
+        st.subheader(f"Vista Previa del Presupuesto N° {data_pdf['presupuesto_id']}")
         
-        col_pdf_resumen1, col_pdf_resumen2 = st.columns(2)
+        # Muestra el detalle final de la tabla de presupuesto
+        df_detalle = data_pdf['df_detalle_final_presupuesto'].copy()
         
-        # Muestra el resumen en Streamlit antes de la descarga
-        col_pdf_resumen1.metric("Cliente", data_pdf['cliente_nombre'])
-        col_pdf_resumen1.metric("Volumen Total (L)", f"{data_pdf['litros_total_acumulado']:,.2f}")
-        col_pdf_resumen2.metric("Precio Final (ARS)", f"${data_pdf['precio_final_ars']:,.2f}")
-        col_pdf_resumen2.metric("Precio Final (USD)", f"USD ${data_pdf['precio_final_ars'] / data_pdf['cotizacion_dolar_actual']:,.2f}")
-
-        st.markdown("Detalle:")
+        # <<< FIX de Robustez para KeyError: 'Litros' >>>
+        # Se asegura que la columna 'Litros' tenga la 'L' mayúscula en caso de Session State desactualizado
+        if 'litros' in df_detalle.columns:
+            df_detalle.rename(columns={'litros': 'Litros'}, inplace=True)
+            
+        # Calcular el precio unitario por envase para la vista previa
+        df_detalle['Precio Venta ARS/u.'] = df_detalle['Precio_Venta_Total_ARS'] / df_detalle['Unidades_Envase_Total']
+        df_detalle['Precio Venta USD/u.'] = df_detalle['Precio_Venta_Total_USD'] / df_detalle['Unidades_Envase_Total']
+        df_detalle.rename(columns={'Precio_Venta_Total_ARS': 'Total ARS', 'Precio_Venta_Total_USD': 'Total USD'}, inplace=True)
         
-        df_detalle_pdf = data_pdf['df_detalle_final_presupuesto'].copy() # Usar una copia para evitar SettingWithCopyWarning
-        
-        # Cálculo del precio unitario por envase para la tabla de visualización
-        df_detalle_pdf['Precio Venta ARS/u.'] = df_detalle_pdf['Precio_Venta_Total_ARS'] / df_detalle_pdf['Unidades_Envase_Total']
-        df_detalle_pdf['Precio Venta USD/u.'] = df_detalle_pdf['Precio_Venta_Total_USD'] / df_detalle_pdf['Unidades_Envase_Total']
-        df_detalle_pdf.rename(columns={'Precio_Venta_Total_ARS': 'Total ARS', 'Precio_Venta_Total_USD': 'Total USD'}, inplace=True)
-        
+        # [MODIFICACIÓN CLAVE] Eliminar 'Envase_Nombre' de la vista previa de la tabla
         st.dataframe(
-            df_detalle_pdf[['Receta', 'Litros', 'Envase_Nombre', 'Unidades_Envase_Total', 'Precio Venta ARS/u.', 'Precio Venta USD/u.', 'Total ARS', 'Total USD']],
+            df_detalle[['Receta', 'Litros', 'Unidades_Envase_Total', 'Capacidad_Litros', 'Precio Venta ARS/u.', 'Precio Venta USD/u.', 'Total ARS', 'Total USD']],
             use_container_width=True,
             hide_index=True,
             column_config={
-                'Precio Venta ARS/u.': st.column_config.NumberColumn(format="$,.2f"),
-                'Precio Venta USD/u.': st.column_config.NumberColumn(format="$,.2f"),
-                'Total ARS': st.column_config.NumberColumn(format="$,.2f"),
-                'Total USD': st.column_config.NumberColumn(format="$,.2f")
+                'Precio Venta ARS/u.': st.column_config.NumberColumn(format="$%.2f"),
+                'Precio Venta USD/u.': st.column_config.NumberColumn(format="$%.2f"),
+                'Total ARS': st.column_config.NumberColumn(format="$%.2f"),
+                'Total USD': st.column_config.NumberColumn(format="$%.2f")
             }
         )
         
@@ -1667,7 +1595,7 @@ def main():
         pdf_output = generate_pdf_reportlab(data_pdf)
         
         st.download_button(
-            label=f"⬇️ Descargar Presupuesto N° {data_pdf['presupuesto_id']} ({data_pdf['cliente_nombre'].replace(' ', '_')}.pdf)",
+            label=f"⬇️ Descargar Presupuesto N° {data_pdf['presupuesto_id']} ({data_pdf['cliente_nombre']}.pdf)",
             data=pdf_output,
             file_name=f"Presupuesto_{data_pdf['presupuesto_id']}_{data_pdf['cliente_nombre'].replace(' ', '_')}.pdf",
             mime="application/pdf"
@@ -1676,10 +1604,11 @@ def main():
         if st.button("🗑️ Limpiar Vista de Presupuesto"):
             st.session_state['presupuesto_data_for_print'] = {}
             st.rerun()
-            
+        
     elif st.session_state['simulaciones_presupuesto']:
-        st.info("Presione 'Guardar y Generar PDF' para ver el resumen final y la descarga.")
+        st.info("Actualice el presupuesto (botón superior) para generar el resumen final.")
+        
+    conn.close()
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
