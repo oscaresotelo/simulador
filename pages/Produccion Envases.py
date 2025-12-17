@@ -30,7 +30,63 @@ VOLUMEN_MENSUAL_AUTOMATICO = RECETAS_DIARIAS * DIAS_HABILES_FIJOS_MENSUAL * BASE
 # =================================================================================================
 # UTILIDADES DB
 # =================================================================================================
+def obtener_costo_real_mp(materia_prima_id, conn):
+    """
+    Calcula el costo de una MP. Si es compuesta (como el SERUM), 
+    suma el costo de sus componentes según su proporción.
+    """
+    cursor = conn.cursor()
+    # 1. Buscamos si tiene componentes en 'composicion_colorantes'
+    cursor.execute("""
+        SELECT colorante_primario_id, proporcion 
+        FROM composicion_colorantes 
+        WHERE colorante_combinado_id = ?
+    """, (materia_prima_id,))
+    componentes = cursor.fetchall()
 
+    if componentes:
+        # Es una materia prima compuesta (Ej: SERUM)
+        costo_total_combinado = 0.0
+        for comp_id, proporcion in componentes:
+            cursor.execute("""
+                SELECT precio_unitario FROM precios_materias_primas 
+                WHERE materia_prima_id = ? ORDER BY fecha DESC LIMIT 1
+            """, (comp_id,))
+            precio_comp = cursor.fetchone()
+            if precio_comp:
+                costo_total_combinado += precio_comp[0] * proporcion
+        return costo_total_combinado
+    else:
+        # Es una materia prima simple
+        cursor.execute("""
+            SELECT precio_unitario FROM precios_materias_primas 
+            WHERE materia_prima_id = ? ORDER BY fecha DESC LIMIT 1
+        """, (materia_prima_id,))
+        resultado = cursor.fetchone()
+        return resultado[0] if resultado else 0.0
+
+def obtener_precio_combinado(conn, materia_prima_id):
+    """
+    Busca si una MP es combinada. Si lo es, devuelve el costo sumado de sus componentes.
+    Si no, devuelve None para seguir con la búsqueda normal.
+    """
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT colorante_primario_id, proporcion 
+        FROM composicion_colorantes 
+        WHERE colorante_combinado_id = ?
+    """, (materia_prima_id,))
+    componentes = cursor.fetchall()
+
+    if componentes:
+        costo_total = 0.0
+        for comp_id, proporcion in componentes:
+            # Reutilizamos tu función existente para obtener el precio de cada parte
+            p_base, _, _, _ = obtener_precio_actual_materia_prima(conn, comp_id)
+            costo_total += (p_base * proporcion)
+        return costo_total
+    return None
+            
 def get_connection():
     """Establece la conexión a la base de datos."""
     conn = sqlite3.connect(DB_PATH)
@@ -210,11 +266,44 @@ def obtener_ingredientes_receta(conn, receta_id):
 def obtener_precio_actual_materia_prima(conn, materia_prima_id):
     """
     Obtiene el último precio unitario y la cotización USD registrada.
+    AHORA: Detecta si es una materia prima combinada (ej: SERUM) y suma sus partes.
     """
     if materia_prima_id == -1:
         return 0.0, 0.0, 0.0, 1.0
 
     cursor = conn.cursor()
+    
+    # -------------------------------------------------------------------------
+    # NUEVA LÓGICA: VERIFICAR SI ES UNA MATERIA PRIMA COMBINADA (Tipo SERUM)
+    # -------------------------------------------------------------------------
+    cursor.execute("""
+        SELECT colorante_primario_id, proporcion 
+        FROM composicion_colorantes 
+        WHERE colorante_combinado_id = ?
+    """, (materia_prima_id,))
+    componentes = cursor.fetchall()
+
+    if componentes:
+        precio_total_combinado = 0.0
+        # Iteramos sobre los componentes que forman el SERUM
+        for comp in componentes:
+            # comp[0] es id_primario, comp[1] es proporcion
+            id_primario = comp[0]
+            proporcion = comp[1]
+            
+            # Llamada recursiva para obtener el precio de cada ingrediente del SERUM
+            p_base, flete, otros, cotiz = obtener_precio_actual_materia_prima(conn, id_primario)
+            
+            # Sumamos el costo proporcional al total
+            precio_total_combinado += (p_base * proporcion)
+            
+        # Retornamos el costo sumado. Usamos cotización 1.0 porque el cálculo ya resolvió el valor.
+        return precio_total_combinado, 0.0, 0.0, 1.0
+    # -------------------------------------------------------------------------
+    # FIN LÓGICA DE COMBINADOS
+    # -------------------------------------------------------------------------
+
+    # Búsqueda normal en compras_materia_prima
     cursor.execute("""
         SELECT precio_unitario, cotizacion_usd, moneda
         FROM compras_materia_prima
@@ -225,17 +314,20 @@ def obtener_precio_actual_materia_prima(conn, materia_prima_id):
     
     compra = cursor.fetchone()
     if compra:
-        precio_base = compra['precio_unitario']
+        # Nota: He usado índices numéricos por si el row_factory no está como sqlite3.Row
+        # Si usas row_factory = sqlite3.Row, puedes volver a ['precio_unitario']
+        precio_base = compra[0]
         costo_flete = 0.0 
         otros_costos = 0.0 
-        cotizacion_usd_reg = compra['cotizacion_usd'] if compra['cotizacion_usd'] is not None else 1.0
-        moneda = compra['moneda']
+        cotizacion_usd_reg = compra[1] if compra[1] is not None else 1.0
+        moneda = compra[2]
         
         if moneda == 'ARS' and cotizacion_usd_reg <= 1.0:
             return precio_base, costo_flete, otros_costos, 1.0
         else:
             return precio_base, costo_flete, otros_costos, cotizacion_usd_reg
     else:
+        # Búsqueda en precios_materias_primas
         cursor.execute("""
             SELECT precio_unitario, costo_flete, otros_costos, cotizacion_usd
             FROM precios_materias_primas
@@ -245,10 +337,9 @@ def obtener_precio_actual_materia_prima(conn, materia_prima_id):
         """, (materia_prima_id,))
         precio = cursor.fetchone()
         if precio:
-            return precio['precio_unitario'], precio['costo_flete'], precio['otros_costos'], precio['cotizacion_usd']
+            return precio[0], precio[1], precio[2], precio[3]
         
         return 0.0, 0.0, 0.0, 1.0
-
 def calcular_costo_total(ingredientes_df, cotizacion_dolar_actual, conn):
     """
     Calcula el costo total SÓLO de la Materia Prima en ARS.
