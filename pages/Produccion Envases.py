@@ -608,6 +608,8 @@ def generate_pdf_reportlab(data):
 # =================================================================================================
 
 def main():
+    costo_total_final = 0.0
+
     st.set_page_config(layout="wide")
     st.title("Simulador de Costo de Receta (ARS y USD) 💰 - SOLO SIMULACIÓN")
 
@@ -627,7 +629,16 @@ def main():
         
     if 'simulaciones_presupuesto' not in st.session_state:
         st.session_state['simulaciones_presupuesto'] = []
-    
+
+    if 'margen_deseado' not in st.session_state:
+        st.session_state.margen_deseado = 30.0
+
+    if 'precio_venta_manual' not in st.session_state:
+        st.session_state.precio_venta_manual = 0.0
+
+    if 'origen_edicion' not in st.session_state:
+        st.session_state.origen_edicion = "margen"
+
     if 'presupuesto_data_for_print' not in st.session_state:
         st.session_state['presupuesto_data_for_print'] = {}
         
@@ -643,7 +654,12 @@ def main():
         st.session_state['costo_etiqueta_por_envase'] = 0.0
     if 'costo_caja_por_envase' not in st.session_state:
         st.session_state['costo_caja_por_envase'] = 0.0
-        
+    if "margen_deseado" not in st.session_state:
+        st.session_state.margen_deseado = 30.0
+
+    if "precio_venta_manual" not in st.session_state:
+        st.session_state.precio_venta_manual = 0.0
+   
     conn = get_connection()
     create_tables_if_not_exists(conn)
     
@@ -1388,54 +1404,144 @@ def main():
             st.session_state.litros = BASE_LITROS
             st.rerun()
 
-    # =================================================================================================
-    # PRESUPUESTO ACUMULADO
-    # =================================================================================================
-    col_agregar, col_margen = st.columns([0.6, 0.4])
+        # =================================================================================================
+        # PRESUPUESTO ACUMULADO
+        # =================================================================================================
+        # --------------------------------------------------------------------------------------
+    # DEFINICIÓN DE MARGEN / PRECIO DE VENTA (EDITABLE)
+    # --------------------------------------------------------------------------------------
+
+    # --------------------------------------------------------------------------------------
+    # DEFINICIÓN DE MARGEN / PRECIO DE VENTA (BIDIRECCIONAL)
+    # --------------------------------------------------------------------------------------
+
+    if costo_total_final > 0:
+
+        st.subheader("Definir Margen y Precio de Venta")
+
+        col_m1, col_m2 = st.columns(2)
+
+        # ---- Margen ----
+        # ------------------ MARGEN ------------------
+        with col_m1:
+
+            # FIX: evitar valores negativos en number_input
+            margen_seguro = max(0.0, st.session_state.margen_deseado)
+
+            margen_input = st.number_input(
+                "Margen de ganancia deseado (%)",
+                min_value=0.0,
+                step=1.0,
+                format="%.2f",
+                value=margen_seguro,
+                key="margen_input_principal"
+            )
+
+        # ---- Precio ----
+        with col_m2:
+            precio_input = st.number_input(
+                "Precio de venta total manual (ARS)",
+                min_value=0.0,
+                step=100.0,
+                format="%.2f",
+                value=st.session_state.precio_venta_manual,
+                key="precio_input"
+            )
+
+        # ---- LÓGICA BIDIRECCIONAL ----
+        if margen_input != st.session_state.margen_deseado:
+            st.session_state.margen_deseado = margen_input
+            st.session_state.precio_venta_manual = costo_total_final * (1 + margen_input / 100)
+
+        elif precio_input != st.session_state.precio_venta_manual:
+            st.session_state.precio_venta_manual = precio_input
+
+            margen_calculado = (
+                (precio_input - costo_total_final) / costo_total_final * 100
+            ) if costo_total_final > 0 else 0.0
+
+            # FIX: nunca permitir margen negativo
+            st.session_state.margen_deseado = max(0.0, margen_calculado)
+
+        st.markdown(f"""
+        **Costo Total (ARS):** ${costo_total_final:,.2f}  
+        **Margen Calculado:** **{st.session_state.margen_deseado:,.2f}%**  
+        **Precio de Venta Total:** ${st.session_state.precio_venta_manual:,.2f}
+        """)
+
+    st.markdown("---")
+
     if receta_id_seleccionada and costo_total_final > 0:
+
+        col_agregar, col_margen = st.columns([0.6, 0.4])
+        if receta_id_seleccionada and costo_total_final > 0:
+
+            col_agregar, col_margen = st.columns([0.6, 0.4])
+
         # --------------------------------------------------------------------------------------
         # 1. FORMULARIO PARA AGREGAR AL PRESUPUESTO
         # --------------------------------------------------------------------------------------
         with col_agregar.form("form_agregar_presupuesto"):
+
             col_agregar.subheader("Añadir Simulación al Presupuesto")
+
             col_tanda, col_litros_total = col_agregar.columns(2)
+
             cantidad_a_agregar = col_tanda.number_input(
-                f"Número de Tandas de {cantidad_litros:.2f}L:", min_value=1, value=1, step=1, key="cantidad_tandas"
+                f"Número de Tandas de {cantidad_litros:.2f}L:",
+                min_value=1,
+                value=1,
+                step=1,
+                key="cantidad_tandas"
             )
-            # --- [MODIFICACIÓN CLAVE: INGRESO MANUAL DEL PRECIO DE VENTA] ---
+
             costo_final_tandas = costo_total_final * cantidad_a_agregar
-            
-            precio_venta_total_ars_manual = col_margen.number_input(
-                "Precio de Venta Total Manual (ARS):", 
-                min_value=costo_final_tandas, # El precio mínimo es el costo total
-                value=costo_final_tandas * 1.30, # Sugerencia inicial (30% margen)
-                step=100.0, 
-                format="%.2f",
-                key="precio_venta_total_ars_manual"
-            )
-            
-            total_litros = cantidad_litros * cantidad_a_agregar
-            col_litros_total.metric("Volumen Total a Presupuestar", f"{total_litros:,.2f} Litros")
-            
-            precio_venta_total_ars = precio_venta_total_ars_manual
+
+            # -------------------------------
+            # PRECIO / MARGEN BIDIRECCIONAL
+            # -------------------------------
+            precio_venta_total_ars = st.session_state.precio_venta_manual * cantidad_a_agregar
             precio_venta_total_usd = precio_venta_total_ars / cotizacion_dolar_actual
-            
-            # Calcular el margen de ganancia real para mostrarlo y guardarlo
-            margen_ganancia_calculado = ((precio_venta_total_ars - costo_final_tandas) / costo_final_tandas) * 100 if costo_final_tandas > 0 else 0.0
+
+            margen_ganancia_calculado = (
+                (precio_venta_total_ars - costo_final_tandas) / costo_final_tandas * 100
+            ) if costo_final_tandas > 0 else 0.0
+
+            total_litros = cantidad_litros * cantidad_a_agregar
+            col_litros_total.metric(
+                "Volumen Total a Presupuestar",
+                f"{total_litros:,.2f} Litros"
+            )
 
             st.markdown(f"**Costo Total de Producción (ARS):** ${costo_final_tandas:,.2f}")
             st.markdown(f"**Margen de Ganancia Calculado:** **{margen_ganancia_calculado:,.2f}%**")
             st.markdown(f"**Precio de Venta Total (ARS):** ${precio_venta_total_ars:,.2f}")
             st.markdown(f"**Precio de Venta Total (USD):** USD ${precio_venta_total_usd:,.2f}")
+            # -------------------------------
+            # PRECIO FINAL POR LITRO (VISTA CLIENTE)
+            # -------------------------------
+            if total_litros > 0:
+                precio_por_litro_ars = precio_venta_total_ars / total_litros
+                precio_por_litro_usd = precio_por_litro_ars / cotizacion_dolar_actual
 
+                st.markdown("### 💰 Precio Final por Litro")
+                col_pl1, col_pl2 = st.columns(2)
+
+                col_pl1.metric(
+                    "ARS por Litro",
+                    f"${precio_por_litro_ars:,.2f}"
+                )
+
+                col_pl2.metric(
+                    "USD por Litro",
+                    f"USD ${precio_por_litro_usd:,.2f}"
+                )
+
+            # ✅ EL BOTÓN VA DENTRO DEL FORM
             if st.form_submit_button("➕ Agregar al Presupuesto"):
-                # Asignar un ID único (temporalmente, solo incremental en la sesión)
+
                 next_id = len(st.session_state['simulaciones_presupuesto']) + 1
-                
-                # Almacenar el margen calculado
-                margen_ganancia_final = margen_ganancia_calculado
-                
-                # Crear la data de simulación
+
                 simulacion_data = {
                     'ID': next_id,
                     'nombre_receta': receta_seleccionada_nombre,
@@ -1444,24 +1550,29 @@ def main():
                     'costo_por_litro_ars': costo_por_litro_ars,
                     'gasto_indirecto_tanda': gasto_indirecto_tanda * cantidad_a_agregar,
                     'costo_flete_total_ars': costo_flete_total_ars * cantidad_a_agregar,
-                    'costo_envase_total_ars': costo_total_empaque_ars * cantidad_a_agregar, # Usar costo_total_empaque_ars
+                    'costo_envase_total_ars': costo_total_empaque_ars * cantidad_a_agregar,
                     'costo_mp_total_ars': costo_mp_total * cantidad_a_agregar,
                     'costo_total_mp_usd': costo_total_mp_usd * cantidad_a_agregar,
                     'cantidad_tandas': cantidad_a_agregar,
-                    'margen_ganancia': margen_ganancia_final, # Se guarda el margen calculado
-                    'precio_venta_total_ars': precio_venta_total_ars, # Se guarda el precio manual
+                    'margen_ganancia': margen_ganancia_calculado,
+                    'precio_venta_total_ars': precio_venta_total_ars,
                     'precio_venta_total_usd': precio_venta_total_usd,
                     'envase_info_json': json.dumps({
-                        'Envase_Nombre': envase_seleccionado_nombre_final, # Usar el nombre final determinado
-                        'Capacidad_Litros': capacidad_litros, # <<< INCLUYE LA CAPACIDAD
+                        'Envase_Nombre': envase_seleccionado_nombre_final,
+                        'Capacidad_Litros': capacidad_litros,
                         'Unidades_Envase_Total': unidades_necesarias * cantidad_a_agregar,
                         'Precio_Envase_Unitario_ARS': precio_envase_unitario_ars,
                     })
                 }
+
                 st.session_state['simulaciones_presupuesto'].append(simulacion_data)
-                st.success(f"Simulación '{receta_seleccionada_nombre}' añadida al presupuesto con un precio de venta de ${precio_venta_total_ars:,.2f} ARS.")
-    
-    st.markdown("---")
+                st.success(
+                    f"Simulación '{receta_seleccionada_nombre}' añadida al presupuesto "
+                    f"con un precio de venta de ${precio_venta_total_ars:,.2f} ARS."
+                )
+
+        st.markdown("---")
+
 
     # --------------------------------------------------------------------------------------
     # 2. VISUALIZACIÓN Y EDICIÓN DEL PRESUPUESTO ACUMULADO
